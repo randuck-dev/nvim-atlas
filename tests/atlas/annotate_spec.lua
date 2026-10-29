@@ -18,22 +18,32 @@ describe("atlas.annotate storage", function()
 
   it("records and reloads an annotation", function()
     local sid = fresh_session_id()
-    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line = 12, text = "fix this" })
+    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 12, line_end = 12, text = "fix this" })
 
     local list = annotate.load(sid)
     assert.are.equal(1, #list)
     assert.are.equal("/tmp/repo-a", list[1].worktree)
     assert.are.equal("f.lua", list[1].file)
-    assert.are.equal(12, list[1].line)
+    assert.are.equal(12, list[1].line_start)
+    assert.are.equal(12, list[1].line_end)
     assert.are.equal("fix this", list[1].text)
     assert.is_number(list[1].created)
   end)
 
+  it("records and reloads a multi-line range annotation", function()
+    local sid = fresh_session_id()
+    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 10, line_end = 14, text = "this whole block" })
+
+    local list = annotate.load(sid)
+    assert.are.equal(10, list[1].line_start)
+    assert.are.equal(14, list[1].line_end)
+  end)
+
   it("counts pending annotations per worktree", function()
     local sid = fresh_session_id()
-    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line = 1, text = "a" })
-    annotate.record(sid, { worktree = "/tmp/repo-a", file = "g.lua", line = 2, text = "b" })
-    annotate.record(sid, { worktree = "/tmp/repo-b", file = "h.lua", line = 3, text = "c" })
+    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 1, line_end = 1, text = "a" })
+    annotate.record(sid, { worktree = "/tmp/repo-a", file = "g.lua", line_start = 2, line_end = 2, text = "b" })
+    annotate.record(sid, { worktree = "/tmp/repo-b", file = "h.lua", line_start = 3, line_end = 3, text = "c" })
 
     assert.are.equal(2, annotate.pending_for(sid, "/tmp/repo-a"))
     assert.are.equal(1, annotate.pending_for(sid, "/tmp/repo-b"))
@@ -42,8 +52,8 @@ describe("atlas.annotate storage", function()
 
   it("clears only the annotations for the given worktree", function()
     local sid = fresh_session_id()
-    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line = 1, text = "a" })
-    annotate.record(sid, { worktree = "/tmp/repo-b", file = "h.lua", line = 3, text = "c" })
+    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 1, line_end = 1, text = "a" })
+    annotate.record(sid, { worktree = "/tmp/repo-b", file = "h.lua", line_start = 3, line_end = 3, text = "c" })
 
     annotate.clear_for(sid, "/tmp/repo-a")
 

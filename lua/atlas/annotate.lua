@@ -12,7 +12,8 @@ local function annotations_path(session_id)
   return dir .. "/" .. session_id .. ".json"
 end
 
---- All pending annotations for `session_id`: {worktree, file, line, text, created}[].
+--- All pending annotations for `session_id`:
+--- {worktree, file, line_start, line_end, text, created}[].
 function M.load(session_id)
   local path = annotations_path(session_id)
   if vim.fn.filereadable(path) == 0 then
@@ -72,11 +73,15 @@ local function current_file()
   return entry and entry.path or nil
 end
 
---- Prompts for a note on the current diffview file/line and records it
---- against the enclosing atlas review tab's worktree. No-ops (with a
---- warning) outside an atlas review tab, or when the current file can't
---- be resolved from diffview.
-function M.add()
+--- Prompts for a note on the current diffview file, over lines
+--- `line1`-`line2` (pass the same value twice for a single line), and
+--- records it against the enclosing atlas review tab's worktree. Meant
+--- to be driven by a range-aware command/keymap (see init.lua) so a
+--- visual selection becomes the range directly — select with `V`, extend
+--- with `j`, hit the keymap, type the note, `<CR>`, select the next bit
+--- and repeat. No-ops (with a warning) outside an atlas review tab, or
+--- when the current file can't be resolved from diffview.
+function M.add(line1, line2)
   local ctx = review.context()
   if not ctx then
     vim.notify("atlas: not in an atlas review tab", vim.log.levels.WARN)
@@ -88,13 +93,19 @@ function M.add()
     vim.notify("atlas: couldn't resolve the current file in diffview", vim.log.levels.WARN)
     return
   end
-  local line = vim.api.nvim_win_get_cursor(0)[1]
 
-  vim.ui.input({ prompt = string.format("Note on %s:%d: ", file, line) }, function(text)
+  line1 = line1 or vim.api.nvim_win_get_cursor(0)[1]
+  line2 = line2 or line1
+  if line1 > line2 then
+    line1, line2 = line2, line1
+  end
+
+  local where = line1 == line2 and (file .. ":" .. line1) or string.format("%s:%d-%d", file, line1, line2)
+  vim.ui.input({ prompt = "Note on " .. where .. ": " }, function(text)
     if not text or text == "" then
       return
     end
-    M.record(ctx.session_id, { worktree = ctx.path, file = file, line = line, text = text })
+    M.record(ctx.session_id, { worktree = ctx.path, file = file, line_start = line1, line_end = line2, text = text })
     vim.notify("atlas: note added", vim.log.levels.INFO)
   end)
 end
