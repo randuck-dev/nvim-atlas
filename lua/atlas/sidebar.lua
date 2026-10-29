@@ -9,6 +9,7 @@
 local data = require("atlas.data")
 local review = require("atlas.review")
 local annotate = require("atlas.annotate")
+local deliver = require("atlas.deliver")
 
 local M = {}
 
@@ -75,6 +76,13 @@ local function ensure_buf()
     -- into the session itself (its terminal) is still an open question
     -- the user hasn't settled on, not something to guess at.
   end, "atlas: review worktree under cursor")
+
+  map("y", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if row and row.kind == "worktree" then
+      deliver.copy_for_worktree(row.session_id, row.path, vim.fn.fnamemodify(row.path, ":t"))
+    end
+  end, "atlas: copy pending notes for worktree under cursor")
 
   map("r", M.refresh, "atlas: refresh")
   map("q", function()

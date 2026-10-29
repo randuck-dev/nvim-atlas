@@ -7,11 +7,25 @@ local annotate = require("atlas.annotate")
 -- underneath it directly, with real file IO against a disposable
 -- session id.
 
+-- vim.loop.hrtime() is a monotonic nanosecond clock: unlike
+-- os.time()+math.random() (unseeded, so deterministic across process
+-- starts — this bit us once already, colliding both within a run and
+-- across repeated runs), this is actually unique per call.
+local created_sids = {}
 local function fresh_session_id()
-  return "atlas-test-" .. tostring(os.time()) .. "-" .. tostring(math.random(100000))
+  local sid = "atlas-test-" .. tostring(vim.loop.hrtime())
+  created_sids[#created_sids + 1] = sid
+  return sid
 end
 
 describe("atlas.annotate storage", function()
+  after_each(function()
+    for _, sid in ipairs(created_sids) do
+      vim.fn.delete(vim.fn.stdpath("state") .. "/nvim-atlas/annotations/" .. sid .. ".json")
+    end
+    created_sids = {}
+  end)
+
   it("starts empty for an unseen session", function()
     assert.are.same({}, annotate.load(fresh_session_id()))
   end)
