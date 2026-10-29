@@ -1,31 +1,65 @@
 -- Read-only, near-live view of a session's tmux pane inside Neovim.
 --
 -- Deliberately `tmux capture-pane` on a timer, not full control-mode RPC
--- (`tmux -CC`): capture-pane gives the pane's current *rendered* screen
--- as clean text (verified directly: a real Claude Code pane came
--- through perfectly readable, no escape codes), which is all a "what's
--- this session doing" peek needs. Control-mode streams the raw
--- terminal byte stream instead (cursor moves, colors, redraws) -- making
--- that readable would mean writing a small terminal emulator, for no
--- benefit here.
+-- (`tmux -CC`): capture-pane gives the pane's current *rendered* screen,
+-- not a byte-level event stream, which is all a "what's this session
+-- doing" peek needs. With `-e` it keeps the real ANSI color codes, fed
+-- into a Neovim-native terminal buffer (`nvim_open_term`) so the peek
+-- shows the session's actual colors rather than flat text.
+--
+-- Lives in the window next to the sidebar (taking over whatever buffer
+-- was there), not a floating modal -- it's meant to be a normal buffer
+-- you can focus on, not an overlay.
 
 local data = require("atlas.data")
 
 local M = {}
 
-local function capture(pane, cb)
-  vim.system({ "tmux", "capture-pane", "-t", pane, "-p" }, { text = true }, function(result)
+local function capture_ansi(pane, cb)
+  vim.system({ "tmux", "capture-pane", "-e", "-p", "-t", pane }, { text = true }, function(result)
     vim.schedule(function()
       cb(result.code == 0 and (result.stdout or "") or nil)
     end)
   end)
 end
-M._capture = capture
+M._capture = capture_ansi
 
---- Opens a floating window peeking at session_id's tmux pane, refreshed
---- every second until the window is closed (`q` or any other close).
---- No-ops (with a warning) if the session isn't live or has no recorded
---- tmux pane.
+-- Singleton: only one peek is ever live at a time, so re-pressing <CR>
+-- on a (same or different) session doesn't leak timers/terminals.
+local current = nil -- { buf, win, chan, timer, session_id }
+
+--- The current peek's timer (or nil), for tests to assert it actually
+--- stopped when switching to a different session.
+function M._current_timer()
+  return current and current.timer
+end
+
+local function stop_current()
+  if not current then
+    return
+  end
+  if current.timer and not current.timer:is_closing() then
+    current.timer:stop()
+    current.timer:close()
+  end
+  current = nil
+end
+
+local function find_main_window()
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(win)
+    if vim.bo[b].filetype ~= "AtlasSidebar" then
+      return win
+    end
+  end
+  return nil
+end
+
+--- Opens a peek at session_id's tmux pane in the window next to the
+--- sidebar (or a new vsplit if the sidebar is the only window),
+--- refreshed every second with real ANSI colors until the buffer is
+--- hidden/closed or another peek replaces it. No-ops (with a warning)
+--- if the session isn't live or has no recorded tmux pane.
 function M.open(session_id)
   data.sessions(function(sessions, err)
     if err then
@@ -48,68 +82,52 @@ function M.open(session_id)
       return
     end
 
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.bo[buf].filetype = "AtlasPeek"
-    vim.bo[buf].buftype = "nofile"
-    vim.bo[buf].bufhidden = "wipe"
-    vim.bo[buf].swapfile = false
+    stop_current()
 
-    local width = math.floor(vim.o.columns * 0.8)
-    local height = math.floor(vim.o.lines * 0.8)
-    local win = vim.api.nvim_open_win(buf, true, {
-      relative = "editor",
-      width = width,
-      height = height,
-      col = math.floor((vim.o.columns - width) / 2),
-      row = math.floor((vim.o.lines - height) / 2),
-      style = "minimal",
-      border = "rounded",
-      title = " " .. (session.title ~= "" and session.title or session.session_id) .. " (live, q to close) ",
-      title_pos = "center",
-    })
+    local win = find_main_window()
+    local buf = vim.api.nvim_create_buf(false, true)
+    local chan = vim.api.nvim_open_term(buf, {})
+
+    if win then
+      vim.api.nvim_win_set_buf(win, buf)
+    else
+      vim.cmd("vsplit")
+      win = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_buf(win, buf)
+    end
+    vim.api.nvim_set_current_win(win)
+
+    current = { buf = buf, win = win, chan = chan, session_id = session_id }
 
     local function refresh()
-      if not vim.api.nvim_buf_is_valid(buf) then
+      if not current or current.buf ~= buf or not vim.api.nvim_buf_is_valid(buf) then
         return
       end
-      capture(session.tmux_pane, function(text)
-        if not vim.api.nvim_buf_is_valid(buf) then
+      capture_ansi(session.tmux_pane, function(text)
+        if not current or current.buf ~= buf or not vim.api.nvim_buf_is_valid(buf) then
           return
         end
-        local lines = vim.split(text or "(pane gone)", "\n", { plain = true })
-        vim.bo[buf].modifiable = true
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-        vim.bo[buf].modifiable = false
+        -- Reset cursor + clear before redrawing, so each snapshot
+        -- replaces the last one cleanly instead of scrolling forever.
+        local body = (text or "(pane gone)"):gsub("\n", "\r\n")
+        vim.api.nvim_chan_send(chan, "\27[H\27[2J" .. body)
       end)
     end
 
     refresh()
     local timer = vim.uv.new_timer()
+    current.timer = timer
     timer:start(1000, 1000, vim.schedule_wrap(refresh))
 
-    local stopped = false
-    local function stop()
-      if stopped then
-        return
-      end
-      stopped = true
-      if not timer:is_closing() then
-        timer:stop()
-        timer:close()
-      end
-    end
-
-    vim.keymap.set("n", "q", function()
-      stop()
-      if vim.api.nvim_win_is_valid(win) then
-        vim.api.nvim_win_close(win, true)
-      end
-    end, { buffer = buf, nowait = true, desc = "atlas: close peek" })
-
-    vim.api.nvim_create_autocmd("WinClosed", {
-      pattern = tostring(win),
+    vim.keymap.set("n", "q", stop_current, { buffer = buf, nowait = true, desc = "atlas: stop peek refresh" })
+    vim.api.nvim_create_autocmd({ "BufHidden", "BufWinLeave" }, {
+      buffer = buf,
       once = true,
-      callback = stop,
+      callback = function()
+        if current and current.buf == buf then
+          stop_current()
+        end
+      end,
     })
   end)
 end
