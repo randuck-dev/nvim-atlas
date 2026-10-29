@@ -9,10 +9,28 @@ local function kill_pane(name)
   vim.system({ "tmux", "kill-session", "-t", name }):wait()
 end
 
+local function capture(pane)
+  local r = vim.system({ "tmux", "capture-pane", "-p", "-t", pane }, { text = true }):wait()
+  return r.stdout or ""
+end
+
+local function open_sidebar_and_main_window()
+  vim.cmd("tabnew")
+  local sidebar_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[sidebar_buf].filetype = "AtlasSidebar"
+  vim.api.nvim_win_set_buf(0, sidebar_buf)
+  vim.cmd("vsplit")
+  local main_win = vim.api.nvim_get_current_win()
+  -- :vsplit duplicates the current buffer into the new window, so
+  -- without this it'd show the sidebar buffer too -- find_main_window()
+  -- would then (correctly) find no non-sidebar window at all.
+  vim.api.nvim_win_set_buf(main_win, vim.api.nvim_create_buf(false, true))
+  return main_win
+end
+
 describe("atlas.peek._capture (real disposable tmux pane)", function()
   it("returns the pane's current rendered screen, ANSI codes included", function()
     local pane = new_pane("atlas-test-peek-" .. string.format("%d", vim.loop.hrtime()))
-    -- A colored echo, so the capture actually has an SGR code to check for.
     vim.system({ "tmux", "send-keys", "-l", "-t", pane, [[printf '\033[31mhello-from-peek-test\033[0m\n']] }):wait()
     vim.system({ "tmux", "send-keys", "-t", pane, "Enter" }):wait()
     vim.wait(500)
@@ -33,6 +51,51 @@ describe("atlas.peek._capture (real disposable tmux pane)", function()
     kill_pane(pane)
   end)
 
+  it("reports the real pane's cursor position", function()
+    local pane = new_pane("atlas-test-peek-cursor-" .. string.format("%d", vim.loop.hrtime()))
+    vim.system({ "tmux", "send-keys", "-l", "-t", pane, "echo hi" }):wait()
+    vim.wait(300)
+
+    local x, y, done = nil, nil, false
+    peek._cursor_pos(pane, function(cx, cy)
+      x, y = cx, cy
+      done = true
+    end)
+    vim.wait(3000, function()
+      return done
+    end, 20)
+
+    assert.is_true(done)
+    assert.is_true(y >= 0, "cursor row should be a valid non-negative position")
+    assert.is_true(x > 0, "cursor column should have advanced past the typed text")
+
+    kill_pane(pane)
+  end)
+
+  it("reports failure (nil, nil) for a pane that doesn't exist", function()
+    local x, y, done = "unset", "unset", false
+    peek._cursor_pos("no-such-pane-at-all", function(cx, cy)
+      x, y = cx, cy
+      done = true
+    end)
+    vim.wait(3000, function()
+      return done
+    end, 20)
+
+    assert.is_true(done)
+    assert.is_nil(x)
+    assert.is_nil(y)
+  end)
+end)
+
+describe("atlas.peek._cup", function()
+  it("converts tmux's 0-indexed cursor_x/cursor_y to a 1-indexed CUP sequence", function()
+    assert.are.equal("\27[1;1H", peek._cup(0, 0))
+    assert.are.equal("\27[5;33H", peek._cup(32, 4))
+  end)
+end)
+
+describe("atlas.peek._capture error handling", function()
   it("reports failure (nil) for a pane that doesn't exist", function()
     local result, done = "unset", false
     peek._capture("no-such-pane-at-all", function(text)
@@ -60,16 +123,8 @@ describe("atlas.peek.open (real tmux pane; claude-status discovery mocked)", fun
     vim.cmd("silent! tabclose")
   end)
 
-  it("takes over the window next to a sidebar-filetype window, not a floating modal", function()
-    -- Simulate "the sidebar is open": one window with filetype
-    -- AtlasSidebar, one plain window next to it -- the scenario this
-    -- feature actually targets.
-    vim.cmd("tabnew")
-    local sidebar_buf = vim.api.nvim_create_buf(false, true)
-    vim.bo[sidebar_buf].filetype = "AtlasSidebar"
-    vim.api.nvim_win_set_buf(0, sidebar_buf)
-    vim.cmd("vsplit")
-    local main_win_before = vim.api.nvim_get_current_win()
+  it("takes over the window next to a sidebar-filetype window, seeded with the pane's current content", function()
+    local main_win_before = open_sidebar_and_main_window()
     local scratch_buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_win_set_buf(main_win_before, scratch_buf)
 
@@ -85,12 +140,12 @@ describe("atlas.peek.open (real tmux pane; claude-status discovery mocked)", fun
 
     local win_count_before = #vim.api.nvim_tabpage_list_wins(0)
     peek.open(sid)
-    vim.wait(2000)
+    vim.wait(1500)
 
     assert.are.equal(win_count_before, #vim.api.nvim_tabpage_list_wins(0), "should reuse the existing window, not open a new one")
 
     local new_buf = vim.api.nvim_win_get_buf(main_win_before)
-    assert.are_not.equal(scratch_buf, new_buf, "the main window's buffer should have been replaced")
+    assert.are_not.equal(scratch_buf, new_buf)
     assert.are.equal("terminal", vim.bo[new_buf].buftype)
 
     local lines = vim.api.nvim_buf_get_lines(new_buf, 0, -1, false)
@@ -100,82 +155,95 @@ describe("atlas.peek.open (real tmux pane; claude-status discovery mocked)", fun
         found = true
       end
     end
-    assert.is_true(found, "expected the captured pane content in the peek buffer")
-
-    -- q should stop the refresh timer without erroring.
-    vim.api.nvim_set_current_win(main_win_before)
-    vim.api.nvim_input("q")
-    vim.wait(100)
+    assert.is_true(found, "expected the seeded pane content in the peek buffer")
 
     kill_pane(pane)
   end)
 
-  it("stops the previous session's timer when switching to another session", function()
-    vim.cmd("tabnew")
-    local sidebar_buf = vim.api.nvim_create_buf(false, true)
-    vim.bo[sidebar_buf].filetype = "AtlasSidebar"
-    vim.api.nvim_win_set_buf(0, sidebar_buf)
-    vim.cmd("vsplit")
+  -- Whether reseed() actually lands the *visible* cursor at the right
+  -- spot isn't covered by an automated test: nvim_win_get_cursor simply
+  -- doesn't track a terminal buffer's cursor position in --headless mode
+  -- at all -- confirmed directly, and not specific to this code: even a
+  -- plain real `:terminal` job running `printf` showed the exact same
+  -- stuck-at-{1,0} behavior with multi-line output in the buffer.
+  -- That's a no-UI-attached limitation of headless Neovim, not something
+  -- a different assertion could work around. What's covered instead:
+  -- _cup()'s 0-indexed-to-1-indexed math (pure, tested directly above),
+  -- and that reseed()'s full capture+cursor-position chain runs without
+  -- erroring (the "takes over the window..." test above exercises this
+  -- same path end to end). The actual visual placement needs confirming
+  -- in a real interactive session, not headless -- that's the only
+  -- environment where this is observable at all.
 
-    local pane_a = new_pane("atlas-test-peek-a-" .. string.format("%d", vim.loop.hrtime()))
-    local pane_b = new_pane("atlas-test-peek-b-" .. string.format("%d", vim.loop.hrtime()))
+  it("streams new output live: text sent to the pane after opening shows up without re-opening", function()
+    local main_win = open_sidebar_and_main_window()
+    local pane = new_pane("atlas-test-peek-live-" .. string.format("%d", vim.loop.hrtime()))
 
-    data.sessions = function(cb)
-      cb({
-        { session_id = "sess-a", tmux_pane = pane_a, state = "done", title = "A" },
-        { session_id = "sess-b", tmux_pane = pane_b, state = "done", title = "B" },
-      }, nil)
-    end
-
-    peek.open("sess-a")
-    vim.wait(1500)
-    local timer_a = peek._current_timer()
-    assert.is_not_nil(timer_a)
-    assert.is_false(timer_a:is_closing())
-
-    peek.open("sess-b")
-    vim.wait(1500)
-    local timer_b = peek._current_timer()
-    assert.is_not_nil(timer_b)
-    assert.are_not.equal(timer_a, timer_b, "switching sessions should create a fresh timer")
-    assert.is_true(timer_a:is_closing(), "the previous session's timer should have been stopped")
-    assert.is_false(timer_b:is_closing())
-
-    kill_pane(pane_a)
-    kill_pane(pane_b)
-  end)
-
-  it("does not accumulate scrollback across repeated refreshes of unchanged content", function()
-    vim.cmd("tabnew")
-    local sidebar_buf = vim.api.nvim_create_buf(false, true)
-    vim.bo[sidebar_buf].filetype = "AtlasSidebar"
-    vim.api.nvim_win_set_buf(0, sidebar_buf)
-    vim.cmd("vsplit")
-
-    local pane = new_pane("atlas-test-peek-static-" .. string.format("%d", vim.loop.hrtime()))
-    vim.system({ "tmux", "send-keys", "-l", "-t", pane, "echo static-content" }):wait()
-    vim.system({ "tmux", "send-keys", "-t", pane, "Enter" }):wait()
-    vim.wait(300)
-
-    local sid = "peek-static-session"
+    local sid = "peek-live-session"
     data.sessions = function(cb)
       cb({ { session_id = sid, tmux_pane = pane, state = "done" } }, nil)
     end
 
     peek.open(sid)
-    vim.wait(1200) -- past the first refresh tick
-    local buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
-    local count_after_first = vim.api.nvim_buf_line_count(buf)
+    vim.wait(1000) -- past the initial seed + pipe-pane startup
 
-    vim.wait(3000) -- a few more ticks, content on the pane never changes
-    local count_after_several = vim.api.nvim_buf_line_count(buf)
+    -- Nothing sent yet, so the marker shouldn't be there.
+    local buf = vim.api.nvim_win_get_buf(main_win)
+    local before = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+    assert.falsy(before:find("live-relay-marker", 1, true))
 
-    assert.are.equal(
-      count_after_first,
-      count_after_several,
-      "buffer should not grow when the underlying pane content is unchanged"
-    )
+    vim.system({ "tmux", "send-keys", "-l", "-t", pane, "echo live-relay-marker" }):wait()
+    vim.system({ "tmux", "send-keys", "-t", pane, "Enter" }):wait()
+    vim.wait(1500) -- give the fifo relay time to deliver it
+
+    local after = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+    assert.truthy(after:find("live-relay-marker", 1, true), "expected output sent after opening to stream in live")
 
     kill_pane(pane)
+  end)
+
+  -- The "forwards typed input" path (on_input -> `tmux send-keys -l`)
+  -- isn't covered by an automated test: nvim_open_term's on_input only
+  -- fires on genuine terminal-mode keystroke dispatch, and that doesn't
+  -- reliably trigger when simulated via nvim_feedkeys(..., 't', false)
+  -- inside plenary's coroutine-based test runner (tried both
+  -- vim.wait() and a real vim.cmd("sleep ...") drain; same result
+  -- either way). Verified directly instead with a standalone headless
+  -- script (plain `-S script.lua`, not through plenary): typing
+  -- "echo typed-input-marker<CR>" into the peek buffer made the real
+  -- disposable tmux pane actually execute it and print the marker. The
+  -- mechanism itself is the same `tmux send-keys` primitive
+  -- deliver_spec.lua already exercises thoroughly against real panes,
+  -- just invoked per-keystroke instead of as one batched paste.
+
+  it("tears down the previous session's reader job and tmux pipe-pane when switching sessions", function()
+    open_sidebar_and_main_window()
+    local pane_a = new_pane("atlas-test-peek-switch-a-" .. string.format("%d", vim.loop.hrtime()))
+    local pane_b = new_pane("atlas-test-peek-switch-b-" .. string.format("%d", vim.loop.hrtime()))
+
+    data.sessions = function(cb)
+      cb({
+        { session_id = "sw-a", tmux_pane = pane_a, state = "done" },
+        { session_id = "sw-b", tmux_pane = pane_b, state = "done" },
+      }, nil)
+    end
+
+    peek.open("sw-a")
+    vim.wait(1000)
+    local reader_a = peek._current_reader()
+    assert.is_not_nil(reader_a)
+
+    peek.open("sw-b")
+    vim.wait(1000)
+    local reader_b = peek._current_reader()
+    assert.is_not_nil(reader_b)
+    assert.are_not.equal(reader_a, reader_b)
+
+    -- pane_a's pipe-pane should be off now (tmux's own per-pane flag).
+    local r = vim.system({ "tmux", "display-message", "-p", "-t", pane_a, "#{pane_pipe}" }, { text = true }):wait()
+    assert.are.equal("0", vim.trim(r.stdout or ""), "pane A's pipe-pane should have been turned off")
+
+    kill_pane(pane_a)
+    kill_pane(pane_b)
   end)
 end)
