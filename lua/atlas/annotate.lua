@@ -6,6 +6,16 @@ local review = require("atlas.review")
 
 local M = {}
 
+local ns = vim.api.nvim_create_namespace("atlas_annotations")
+local hl_done = false
+local function ensure_hl()
+  if hl_done then
+    return
+  end
+  hl_done = true
+  vim.api.nvim_set_hl(0, "AtlasNoteInline", { fg = "#ebbcba", italic = true, default = true }) -- rose
+end
+
 local function annotations_path(session_id)
   local dir = vim.fn.stdpath("state") .. "/nvim-atlas/annotations"
   vim.fn.mkdir(dir, "p")
@@ -73,6 +83,49 @@ local function current_file()
   return entry and entry.path or nil
 end
 
+--- Draws session_id's pending notes on worktree_path/file as virtual
+--- text at end-of-line in bufnr (0 = current), replacing whatever was
+--- there before. Multi-line notes are marked on every line they cover,
+--- not just the first.
+function M.render_inline(bufnr, session_id, worktree_path, file)
+  bufnr = bufnr or 0
+  ensure_hl()
+  vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+
+  local notes = vim.tbl_filter(function(a)
+    return a.worktree == worktree_path and a.file == file
+  end, M.load(session_id))
+
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  for _, n in ipairs(notes) do
+    local l1, l2 = n.line_start or 1, n.line_end or n.line_start or 1
+    for line = l1, l2 do
+      local row = line - 1
+      if row >= 0 and row < line_count then
+        vim.api.nvim_buf_set_extmark(bufnr, ns, row, 0, {
+          virt_text = { { "  « " .. n.text .. " »", "AtlasNoteInline" } },
+          virt_text_pos = "eol",
+        })
+      end
+    end
+  end
+end
+
+--- Re-renders inline notes for whatever file is current in the
+--- enclosing atlas review tab, using whichever buffer is passed (default
+--- current). No-ops outside an atlas review tab, same as M.add().
+function M.refresh_inline(bufnr)
+  local ctx = review.context()
+  if not ctx then
+    return
+  end
+  local file = current_file()
+  if not file then
+    return
+  end
+  M.render_inline(bufnr or 0, ctx.session_id, ctx.path, file)
+end
+
 --- Prompts for a note on the current diffview file, over lines
 --- `line1`-`line2` (pass the same value twice for a single line), and
 --- records it against the enclosing atlas review tab's worktree. Meant
@@ -106,6 +159,7 @@ function M.add(line1, line2)
       return
     end
     M.record(ctx.session_id, { worktree = ctx.path, file = file, line_start = line1, line_end = line2, text = text })
+    M.render_inline(0, ctx.session_id, ctx.path, file)
     vim.notify("atlas: note added", vim.log.levels.INFO)
   end)
 end

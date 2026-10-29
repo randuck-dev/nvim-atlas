@@ -23,6 +23,16 @@ function M.setup(opts)
   -- Deliberately ":AtlasAnnotate<cr>", not "<cmd>...": the leading ":" is
   -- what makes Neovim auto-prefix "'<,'>" from the visual selection.
   vim.keymap.set("x", keys.annotate or "<leader>aa", ":AtlasAnnotate<cr>", { desc = "Atlas: add a note on the selected lines" })
+
+  -- Fires whenever a diffview diff buffer gets focus (opening a file,
+  -- switching between files, or re-entering one) — re-render its inline
+  -- note markers so they stay correct even after a send clears storage.
+  vim.api.nvim_create_autocmd("User", {
+    pattern = "DiffviewDiffBufWinEnter",
+    callback = function()
+      annotate.refresh_inline()
+    end,
+  })
 end
 
 return M

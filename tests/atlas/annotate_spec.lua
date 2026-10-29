@@ -74,4 +74,58 @@ describe("atlas.annotate storage", function()
     assert.are.equal(0, annotate.pending_for(sid, "/tmp/repo-a"))
     assert.are.equal(1, annotate.pending_for(sid, "/tmp/repo-b"))
   end)
+
+  it("renders a single-line note as virtual text on its line", function()
+    local sid = fresh_session_id()
+    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 3, line_end = 3, text = "hello" })
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three", "four", "five" })
+
+    annotate.render_inline(buf, sid, "/tmp/repo-a", "f.lua")
+
+    local ns = vim.api.nvim_create_namespace("atlas_annotations")
+    local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+    assert.are.equal(1, #marks)
+    assert.are.equal(2, marks[1][2]) -- row 2 = line 3, 0-indexed
+    local virt_text = marks[1][4].virt_text[1][1]
+    assert.truthy(virt_text:find("hello", 1, true))
+
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it("renders a multi-line note on every line it covers", function()
+    local sid = fresh_session_id()
+    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 2, line_end = 4, text = "block note" })
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three", "four", "five" })
+
+    annotate.render_inline(buf, sid, "/tmp/repo-a", "f.lua")
+
+    local ns = vim.api.nvim_create_namespace("atlas_annotations")
+    local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {})
+    assert.are.equal(3, #marks) -- lines 2, 3, 4
+
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it("clears previous markers before rendering (no stale notes from an earlier call)", function()
+    local sid = fresh_session_id()
+    annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 1, line_end = 1, text = "first" })
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two" })
+    annotate.render_inline(buf, sid, "/tmp/repo-a", "f.lua")
+
+    -- notes cleared (e.g. after a send) then re-rendered: should show nothing now
+    annotate.clear_for(sid, "/tmp/repo-a")
+    annotate.render_inline(buf, sid, "/tmp/repo-a", "f.lua")
+
+    local ns = vim.api.nvim_create_namespace("atlas_annotations")
+    local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {})
+    assert.are.equal(0, #marks)
+
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
 end)
