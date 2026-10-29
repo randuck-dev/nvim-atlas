@@ -8,6 +8,7 @@
 
 local data = require("atlas.data")
 local review = require("atlas.review")
+local annotate = require("atlas.annotate")
 
 local M = {}
 
@@ -30,6 +31,7 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AtlasCheckFailing", { fg = "#eb6f92", default = true })
   vim.api.nvim_set_hl(0, "AtlasCheckPending", { fg = "#f6c177", default = true })
   vim.api.nvim_set_hl(0, "AtlasCheckNone", { fg = "#6e6a86", default = true })
+  vim.api.nvim_set_hl(0, "AtlasNoteBadge", { fg = "#ebbcba", default = true }) -- rose
 end
 
 local function format_elapsed(epoch)
@@ -136,6 +138,12 @@ local function render(sessions, touched, pr_by_path)
           local badge_start = #wline
           wline = wline .. badge
           highlights[#highlights + 1] = { #lines, badge_start, #wline, CHECK_HL[pr.checks] or "AtlasCheckNone" }
+        end
+        local note_count = annotate.pending_for(session.session_id, path)
+        if note_count > 0 then
+          local note_start = #wline
+          wline = wline .. string.format("  [%d note%s]", note_count, note_count == 1 and "" or "s")
+          highlights[#highlights + 1] = { #lines, note_start, #wline, "AtlasNoteBadge" }
         end
         lines[#lines + 1] = wline
         rows[#lines] = { kind = "worktree", session_id = session.session_id, path = path }
