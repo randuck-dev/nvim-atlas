@@ -1,0 +1,148 @@
+local data = require("atlas.data")
+
+-- Waits for an async atlas.data call to finish, returning whatever it
+-- passed its callback. Fails the test if it doesn't finish in time.
+local function await(fn)
+  local out, done = nil, false
+  fn(function(...)
+    out = { ... }
+    done = true
+  end)
+  vim.wait(5000, function()
+    return done
+  end, 20)
+  assert.is_true(done, "callback never fired")
+  return out
+end
+
+local function fixture_path(name)
+  -- tests are always run from the repo root (see scripts/test.sh).
+  return vim.fn.getcwd() .. "/tests/atlas/fixtures/" .. name
+end
+
+local function read_json_fixture(name)
+  local lines = vim.fn.readfile(fixture_path(name))
+  return vim.json.decode(table.concat(lines, "\n"))
+end
+
+describe("atlas.data._owner_repo", function()
+  it("parses https github remotes", function()
+    assert.are.equal(
+      "randuck-dev/nvim-atlas",
+      data._owner_repo("https://github.com/randuck-dev/nvim-atlas.git")
+    )
+  end)
+
+  it("parses ssh github remotes", function()
+    assert.are.equal("randuck-dev/dotfiles", data._owner_repo("git@github.com:randuck-dev/dotfiles.git"))
+  end)
+
+  it("returns nil for non-github remotes", function()
+    assert.is_nil(data._owner_repo("https://gitlab.com/foo/bar.git"))
+  end)
+end)
+
+describe("atlas.data._summarize_checks and _match_pr (real gh pr list fixture)", function()
+  local prs = read_json_fixture("gh_pr_list.json")
+
+  it("summarizes an all-SUCCESS PR as passing", function()
+    local match = data._match_pr(prs, "fix/duplicate-location-header-on-isr-miss")
+    assert.is_not_nil(match)
+    assert.are.equal(100903, match.number)
+    assert.are.equal("passing", match.checks)
+  end)
+
+  it("summarizes a PR with an unfinished check as pending", function()
+    local match = data._match_pr(prs, "backport-100102-to-lts-active")
+    assert.is_not_nil(match)
+    assert.are.equal("pending", match.checks)
+  end)
+
+  it("summarizes a PR with a FAILURE conclusion as failing", function()
+    local match = data._match_pr(prs, "fleet/segment-config-parity-tests")
+    assert.is_not_nil(match)
+    assert.are.equal("failing", match.checks)
+  end)
+
+  it("returns nil for a branch with no open PR", function()
+    assert.is_nil(data._match_pr(prs, "no-such-branch"))
+  end)
+
+  it("summarizes an empty rollup as none", function()
+    assert.are.equal("none", data._summarize_checks({}))
+    assert.are.equal("none", data._summarize_checks(nil))
+  end)
+end)
+
+describe("atlas.data.merge_base (real git-review call)", function()
+  it("computes the merge base of a throwaway feature branch off main", function()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+
+    local function git(args)
+      local result = vim.system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
+      assert.are.equal(0, result.code, "git " .. table.concat(args, " ") .. " failed: " .. (result.stderr or ""))
+      return result
+    end
+
+    git({ "init", "-q", "-b", "main" })
+    git({ "config", "user.email", "atlas-test@example.com" })
+    git({ "config", "user.name", "atlas test" })
+    vim.fn.writefile({ "one" }, dir .. "/file.txt")
+    git({ "add", "." })
+    git({ "commit", "-q", "-m", "init" })
+    local base_sha = vim.trim(git({ "rev-parse", "HEAD" }).stdout)
+
+    git({ "checkout", "-q", "-b", "feature" })
+    vim.fn.writefile({ "one", "two" }, dir .. "/file.txt")
+    git({ "commit", "-q", "-am", "feature change" })
+
+    local result = await(function(cb)
+      data.merge_base(dir, function(base, target, err)
+        cb(base, target, err)
+      end)
+    end)
+    local base, target, err = result[1], result[2], result[3]
+
+    assert.is_nil(err)
+    assert.are.equal(base_sha, base)
+    assert.are.equal("main", target)
+
+    vim.fn.delete(dir, "rf")
+  end)
+end)
+
+describe("atlas.data.sessions and .touched (real claude-status on this machine)", function()
+  it("sessions() returns well-shaped live session entries", function()
+    local result = await(function(cb)
+      data.sessions(function(sessions, err)
+        cb(sessions, err)
+      end)
+    end)
+    local sessions, err = result[1], result[2]
+
+    assert.is_nil(err)
+    assert.is_table(sessions)
+    for _, session in ipairs(sessions) do
+      assert.is_string(session.session_id)
+      assert.is_string(session.state)
+      assert.is_string(session.cwd)
+    end
+  end)
+
+  it("touched() returns well-shaped touched-worktree entries", function()
+    local result = await(function(cb)
+      data.touched(function(touched, err)
+        cb(touched, err)
+      end)
+    end)
+    local touched, err = result[1], result[2]
+
+    assert.is_nil(err)
+    assert.is_table(touched)
+    for _, entry in ipairs(touched) do
+      assert.is_string(entry.session_id)
+      assert.is_table(entry.paths)
+    end
+  end)
+end)
