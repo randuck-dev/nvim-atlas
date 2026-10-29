@@ -107,10 +107,15 @@ function M.open(session_id)
         if not current or current.buf ~= buf or not vim.api.nvim_buf_is_valid(buf) then
           return
         end
-        -- Reset cursor + clear before redrawing, so each snapshot
-        -- replaces the last one cleanly instead of scrolling forever.
+        -- \27[2J alone only erases the visible screen, not scrollback —
+        -- confirmed directly: the buffer grew by a few lines every tick
+        -- even with byte-for-byte identical content, which is exactly
+        -- the "one line trickles in, old content scrolls away" symptom.
+        -- \27[3J (the same sequence the real `clear` command sends)
+        -- erases scrollback too, so each snapshot truly replaces the
+        -- last one instead of piling up.
         local body = (text or "(pane gone)"):gsub("\n", "\r\n")
-        vim.api.nvim_chan_send(chan, "\27[H\27[2J" .. body)
+        vim.api.nvim_chan_send(chan, "\27[H\27[2J\27[3J" .. body)
       end)
     end
 

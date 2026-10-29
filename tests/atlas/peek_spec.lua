@@ -144,4 +144,38 @@ describe("atlas.peek.open (real tmux pane; claude-status discovery mocked)", fun
     kill_pane(pane_a)
     kill_pane(pane_b)
   end)
+
+  it("does not accumulate scrollback across repeated refreshes of unchanged content", function()
+    vim.cmd("tabnew")
+    local sidebar_buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[sidebar_buf].filetype = "AtlasSidebar"
+    vim.api.nvim_win_set_buf(0, sidebar_buf)
+    vim.cmd("vsplit")
+
+    local pane = new_pane("atlas-test-peek-static-" .. string.format("%d", vim.loop.hrtime()))
+    vim.system({ "tmux", "send-keys", "-l", "-t", pane, "echo static-content" }):wait()
+    vim.system({ "tmux", "send-keys", "-t", pane, "Enter" }):wait()
+    vim.wait(300)
+
+    local sid = "peek-static-session"
+    data.sessions = function(cb)
+      cb({ { session_id = sid, tmux_pane = pane, state = "done" } }, nil)
+    end
+
+    peek.open(sid)
+    vim.wait(1200) -- past the first refresh tick
+    local buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+    local count_after_first = vim.api.nvim_buf_line_count(buf)
+
+    vim.wait(3000) -- a few more ticks, content on the pane never changes
+    local count_after_several = vim.api.nvim_buf_line_count(buf)
+
+    assert.are.equal(
+      count_after_first,
+      count_after_several,
+      "buffer should not grow when the underlying pane content is unchanged"
+    )
+
+    kill_pane(pane)
+  end)
 end)
