@@ -132,7 +132,7 @@ local function ensure_buf()
   return buf
 end
 
-local function render(sessions, touched, pr_by_path)
+local function render(sessions, touched, pr_by_path, changed)
   local by_session = {}
   for _, t in ipairs(touched) do
     by_session[t.session_id] = t
@@ -162,19 +162,30 @@ local function render(sessions, touched, pr_by_path)
     end
     -- Worktrees that no longer exist (e.g. removed by cleanup) are
     -- dropped right away, not after claude-status's 14-day expiry.
+    -- Of the rest, only ones with something to review are shown: changes
+    -- (see data.has_changes) or pending notes. `changed` is nil until
+    -- the first change check finishes; until then only noted ones show,
+    -- so changed repos pop in rather than unchanged ones flashing away.
     local t = by_session[session.session_id]
-    local paths = {}
+    local all_paths, paths = {}, {}
     if t then
       for p, _ in pairs(t.paths) do
         if vim.fn.isdirectory(p) == 1 then
-          paths[#paths + 1] = p
+          all_paths[#all_paths + 1] = p
+          if (changed and changed[p]) or annotate.pending_for(session.session_id, p) > 0 then
+            paths[#paths + 1] = p
+          end
         end
       end
+      table.sort(all_paths)
       table.sort(paths)
     end
 
     lines[#lines + 1] = line
-    rows[#lines] = { kind = "session", session_id = session.session_id, paths = paths }
+    -- Cleanup gets every existing worktree, including hidden ones: a
+    -- merged, clean worktree has "no changes" and is exactly what
+    -- cleanup should remove.
+    rows[#lines] = { kind = "session", session_id = session.session_id, paths = all_paths }
 
     local glyph_hl = STATE_HL[session.state]
     if glyph_hl then
@@ -225,12 +236,13 @@ end
 
 -- Last local data rendered, so reopening the sidebar (or a PR fetch
 -- finishing) can render instantly without waiting on claude-status.
-local last = nil -- { sessions, touched }
+local last = nil -- { sessions, touched, changed }
 local pr_in_flight = false
+local changes_in_flight = false
 
 local function render_last()
   if last and is_open() then
-    render(vim.deepcopy(last.sessions), last.touched, pr_cache)
+    render(vim.deepcopy(last.sessions), last.touched, pr_cache, last.changed)
   end
 end
 
@@ -283,8 +295,31 @@ function M.refresh(force)
         return
       end
 
-      last = { sessions = sessions, touched = touched }
+      -- Render now with the previous change check, then re-check which
+      -- worktrees have changes (local git, a few calls per worktree) and
+      -- re-render if anything appeared or disappeared.
+      last = { sessions = sessions, touched = touched, changed = last and last.changed }
       render_last()
+
+      if not changes_in_flight then
+        changes_in_flight = true
+        local paths, seen = {}, {}
+        for _, t in ipairs(touched) do
+          for p, _ in pairs(t.paths) do
+            if not seen[p] and vim.fn.isdirectory(p) == 1 then
+              seen[p] = true
+              paths[#paths + 1] = p
+            end
+          end
+        end
+        data.changed(paths, function(set)
+          changes_in_flight = false
+          if last and not vim.deep_equal(last.changed, set) then
+            last.changed = set
+            render_last()
+          end
+        end)
+      end
 
       if force or vim.uv.now() - pr_fetched_at >= config.pr_poll_ms then
         refresh_prs(touched)
@@ -320,7 +355,7 @@ end
 --- Forgets cached state and in-flight flags (for tests).
 function M._reset()
   stop_polling()
-  in_flight, pr_in_flight = false, false
+  in_flight, pr_in_flight, changes_in_flight = false, false, false
   last, pr_cache, pr_fetched_at = nil, {}, 0
 end
 

@@ -146,3 +146,66 @@ describe("atlas.data.sessions and .touched (real claude-status on this machine)"
     end
   end)
 end)
+
+describe("atlas.data.has_changes (real git fixtures)", function()
+  local root
+
+  local function git(dir, args)
+    local r = vim.system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
+    assert(r.code == 0, "git " .. table.concat(args, " ") .. ": " .. (r.stderr or ""))
+  end
+
+  local function check(path)
+    local result, done = nil, false
+    data.has_changes(path, function(c)
+      result, done = c, true
+    end)
+    vim.wait(5000, function()
+      return done
+    end, 20)
+    assert.is_true(done)
+    return result
+  end
+
+  before_each(function()
+    root = vim.fn.resolve(vim.fn.tempname())
+    vim.fn.mkdir(root .. "/main", "p")
+    git(root .. "/main", { "init", "-q", "-b", "main" })
+    git(root .. "/main", { "config", "user.email", "t@example.com" })
+    git(root .. "/main", { "config", "user.name", "t" })
+    vim.fn.writefile({ "one" }, root .. "/main/f.txt")
+    git(root .. "/main", { "add", "." })
+    git(root .. "/main", { "commit", "-q", "-m", "init" })
+    git(root .. "/main", { "worktree", "add", "-q", root .. "/wt", "-b", "feature" })
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("is false for a clean worktree with no commits beyond its target", function()
+    assert.is_false(check(root .. "/wt"))
+  end)
+
+  it("is true when the branch has commits not in its target", function()
+    vim.fn.writefile({ "two" }, root .. "/wt/f.txt")
+    git(root .. "/wt", { "commit", "-q", "-am", "change" })
+    assert.is_true(check(root .. "/wt"))
+  end)
+
+  it("is true with uncommitted changes", function()
+    vim.fn.writefile({ "edited" }, root .. "/wt/f.txt")
+    assert.is_true(check(root .. "/wt"))
+  end)
+
+  it("is true with an untracked file", function()
+    vim.fn.writefile({ "new" }, root .. "/wt/new.txt")
+    assert.is_true(check(root .. "/wt"))
+  end)
+
+  it("is false for something that isn't a repository", function()
+    local dir = root .. "/plain"
+    vim.fn.mkdir(dir, "p")
+    assert.is_false(check(dir))
+  end)
+end)

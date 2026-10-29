@@ -24,12 +24,22 @@ end
 
 describe("atlas.sidebar", function()
   before_each(function()
-    real.sessions, real.touched, real.pr_status = data.sessions, data.touched, data.pr_status
+    real.sessions, real.touched, real.pr_status, real.changed = data.sessions, data.touched, data.pr_status, data.changed
     pr_calls = 0
     state = {
       sessions = { { session_id = "s1", state = "done", title = "first session", since = os.time() } },
       touched = { { session_id = "s1", paths = { ["/tmp/atlas-sb/repo-a"] = os.time() } } },
+      changed = { ["/tmp/atlas-sb/repo-a"] = true },
     }
+    data.changed = function(paths, cb)
+      local set = {}
+      for _, p in ipairs(paths) do
+        if state.changed[p] then
+          set[p] = true
+        end
+      end
+      cb(set)
+    end
     data.sessions = function(cb)
       cb(vim.deepcopy(state.sessions), nil)
     end
@@ -51,7 +61,7 @@ describe("atlas.sidebar", function()
     if sidebar_text() then
       sidebar.toggle() -- close
     end
-    data.sessions, data.touched, data.pr_status = real.sessions, real.touched, real.pr_status
+    data.sessions, data.touched, data.pr_status, data.changed = real.sessions, real.touched, real.pr_status, real.changed
     sidebar.configure({ poll_ms = 5000, pr_poll_ms = 30000 })
     vim.cmd("silent! tabclose")
     vim.fn.delete("/tmp/atlas-sb", "rf")
@@ -138,6 +148,40 @@ describe("atlas.sidebar", function()
     data.sessions = function() end
     sidebar.toggle()
     assert.truthy(sidebar_text():find("first session", 1, true))
+  end)
+
+  it("only shows worktrees that have changes", function()
+    vim.fn.mkdir("/tmp/atlas-sb/repo-quiet", "p")
+    state.touched[1].paths["/tmp/atlas-sb/repo-quiet"] = os.time()
+
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("repo-a", 1, true) ~= nil
+    end))
+    assert.falsy(sidebar_text():find("repo-quiet", 1, true))
+
+    -- The session starts changing it: it shows up on the next poll.
+    state.changed["/tmp/atlas-sb/repo-quiet"] = true
+    assert.is_true(wait_for(function()
+      return sidebar_text():find("repo-quiet", 1, true) ~= nil
+    end))
+  end)
+
+  it("still shows an unchanged worktree that has pending notes", function()
+    local sid = "atlas-sb-test-" .. string.format("%d", vim.uv.hrtime())
+    vim.fn.mkdir("/tmp/atlas-sb/repo-noted", "p")
+    state.sessions = { { session_id = sid, state = "done", title = "noted", since = os.time() } }
+    state.touched = { { session_id = sid, paths = { ["/tmp/atlas-sb/repo-noted"] = os.time() } } }
+    state.changed = {}
+    annotate.record(sid, { worktree = "/tmp/atlas-sb/repo-noted", file = "f", line_start = 1, line_end = 1, text = "x" })
+
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("repo-noted", 1, true) ~= nil
+    end))
+    vim.fn.delete(vim.fn.stdpath("state") .. "/nvim-atlas/annotations/" .. sid .. ".json")
   end)
 
   it("hides worktrees that no longer exist on disk", function()

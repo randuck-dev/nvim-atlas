@@ -114,6 +114,55 @@ function M.merge_base(dir, cb)
   end)
 end
 
+--- Whether `dir` has anything to review: uncommitted or untracked files,
+--- or commits that aren't in its target branch (the same merge-base
+--- comparison `git review` uses). cb(true|false). Without a target
+--- branch, only uncommitted/untracked files count.
+function M.has_changes(dir, cb)
+  run({ "git", "-C", dir, "status", "--porcelain" }, function(ok, out)
+    if not ok then
+      cb(false) -- not a repo (anymore): nothing to review
+      return
+    end
+    if vim.trim(out) ~= "" then
+      cb(true)
+      return
+    end
+    M.merge_base(dir, function(base)
+      if not base then
+        cb(false)
+        return
+      end
+      run({ "git", "-C", dir, "rev-list", "--count", base .. "..HEAD" }, function(ok2, count)
+        cb(ok2 and (tonumber(vim.trim(count)) or 0) > 0)
+      end)
+    end)
+  end)
+end
+
+--- has_changes for many paths at once, in parallel. cb(set) where
+--- set[path] = true for each path that has changes.
+function M.changed(paths, cb)
+  parallel(
+    vim.tbl_map(function(path)
+      return function(done)
+        M.has_changes(path, function(changed)
+          done({ path = path, changed = changed })
+        end)
+      end
+    end, paths),
+    function(results)
+      local set = {}
+      for _, r in ipairs(results) do
+        if r.changed then
+          set[r.path] = true
+        end
+      end
+      cb(set)
+    end
+  )
+end
+
 --- "owner/repo" for a GitHub origin URL (ssh or https); nil if the URL
 --- isn't a github.com remote.
 local function owner_repo(origin_url)
