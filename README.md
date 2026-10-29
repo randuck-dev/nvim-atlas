@@ -11,14 +11,17 @@ standalone (non-Neovim) tool.
 
 ## Usage
 
-`<leader>ae` (`:AtlasToggle`) opens the sidebar: live Claude Code
-sessions, the worktrees each has touched, PR/CI status and pending
-notes. It refreshes itself while open.
+`<leader>ae` (`:AtlasToggle`) opens the sidebar: a tree of repos, the
+live Claude Code sessions working in each, and the worktrees each
+session changed, with PR/CI status and pending notes. Worktrees a
+session only touched without changing are hidden. It refreshes itself
+while open.
 
 In the sidebar:
 
 | Key    | On a session row                         | On a worktree row                    |
 |--------|------------------------------------------|--------------------------------------|
+| `n`    | new worktree + Claude session in its repo (also on a repo row) |              |
 | `<CR>` | open the session's tmux pane (live, interactive) | review its diff (diffview)   |
 | `s`    | send all pending notes into the session  |                                      |
 | `X`    | clean up its finished worktrees          |                                      |
@@ -33,6 +36,11 @@ In the session view: `i` to type into the session, `<C-\><C-n>` back to
 normal mode, `q` to close it. It's a real tmux client on a temporary
 grouped session, so it renders exactly like tmux; while you type there,
 the shared tmux window resizes to fit the Neovim window.
+
+`n` asks for a branch name, creates the worktree with worktrunk
+(`wt switch -c`, falling back to `git worktree add`) and opens a tmux
+window named after the branch running `claude`, in the background. The
+new session shows up under its repo once Claude starts.
 
 Cleanup only removes linked worktrees whose PR is merged or whose branch
 is already in its target, with no uncommitted or untracked changes. It

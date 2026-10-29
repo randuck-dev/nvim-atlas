@@ -112,6 +112,14 @@ describe("atlas.deliver.send (real tmux pane; claude-status discovery mocked)", 
   local data = require("atlas.data")
   local real_sessions, real_touched
 
+  -- send() clears notes by writing an empty list, which leaves a file.
+  after_each(function()
+    for _, sid in ipairs(created_sids) do
+      vim.fn.delete(vim.fn.stdpath("state") .. "/nvim-atlas/annotations/" .. sid .. ".json")
+    end
+    created_sids = {}
+  end)
+
   before_each(function()
     real_sessions = data.sessions
     real_touched = data.touched

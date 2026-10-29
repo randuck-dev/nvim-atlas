@@ -114,6 +114,22 @@ function M.merge_base(dir, cb)
   end)
 end
 
+--- The repo `dir` belongs to, identified by its main checkout, so every
+--- worktree of a repo maps to the same place (e.g. devtool.hub ->
+--- devtool). cb({ root = main checkout path, name = its folder name }),
+--- or cb(nil) if `dir` isn't in a git repo.
+function M.repo_of(dir, cb)
+  run({ "git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir" }, function(ok, out)
+    if not ok then
+      cb(nil)
+      return
+    end
+    local common = vim.trim(out):gsub("/+$", "")
+    local root = common:match("^(.*)/%.git$") or common
+    cb({ root = root, name = vim.fn.fnamemodify(root, ":t") })
+  end)
+end
+
 --- Whether `dir` has anything to review: uncommitted or untracked files,
 --- or commits that aren't in its target branch (the same merge-base
 --- comparison `git review` uses). cb(true|false). Without a target

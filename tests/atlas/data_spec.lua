@@ -209,3 +209,53 @@ describe("atlas.data.has_changes (real git fixtures)", function()
     assert.is_false(check(dir))
   end)
 end)
+
+describe("atlas.data.repo_of (real git fixtures)", function()
+  local root
+
+  local function git(dir, args)
+    local r = vim.system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
+    assert(r.code == 0, "git " .. table.concat(args, " ") .. ": " .. (r.stderr or ""))
+  end
+
+  local function repo_of(dir)
+    local result, done = "unset", false
+    data.repo_of(dir, function(r)
+      result, done = r, true
+    end)
+    vim.wait(5000, function()
+      return done
+    end, 20)
+    return result
+  end
+
+  before_each(function()
+    root = vim.fn.resolve(vim.fn.tempname())
+    vim.fn.mkdir(root .. "/myrepo/sub", "p")
+    git(root .. "/myrepo", { "init", "-q", "-b", "main" })
+    git(root .. "/myrepo", { "config", "user.email", "t@example.com" })
+    git(root .. "/myrepo", { "config", "user.name", "t" })
+    vim.fn.writefile({ "x" }, root .. "/myrepo/sub/f.txt")
+    git(root .. "/myrepo", { "add", "." })
+    git(root .. "/myrepo", { "commit", "-q", "-m", "init" })
+    git(root .. "/myrepo", { "worktree", "add", "-q", root .. "/myrepo-feature", "-b", "feature" })
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("names the main checkout for the repo itself and a subfolder", function()
+    assert.are.same({ root = root .. "/myrepo", name = "myrepo" }, repo_of(root .. "/myrepo"))
+    assert.are.same({ root = root .. "/myrepo", name = "myrepo" }, repo_of(root .. "/myrepo/sub"))
+  end)
+
+  it("maps a linked worktree to its main checkout", function()
+    assert.are.same({ root = root .. "/myrepo", name = "myrepo" }, repo_of(root .. "/myrepo-feature"))
+  end)
+
+  it("is nil outside a repo", function()
+    vim.fn.mkdir(root .. "/plain", "p")
+    assert.is_nil(repo_of(root .. "/plain"))
+  end)
+end)

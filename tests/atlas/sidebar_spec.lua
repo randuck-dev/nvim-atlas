@@ -24,13 +24,18 @@ end
 
 describe("atlas.sidebar", function()
   before_each(function()
-    real.sessions, real.touched, real.pr_status, real.changed = data.sessions, data.touched, data.pr_status, data.changed
+    real.sessions, real.touched, real.pr_status, real.changed, real.repo_of = data.sessions, data.touched, data.pr_status, data.changed, data.repo_of
     pr_calls = 0
     state = {
       sessions = { { session_id = "s1", state = "done", title = "first session", since = os.time() } },
       touched = { { session_id = "s1", paths = { ["/tmp/atlas-sb/repo-a"] = os.time() } } },
       changed = { ["/tmp/atlas-sb/repo-a"] = true },
     }
+    -- Folders under /work/<repo>[-anything] belong to <repo>.
+    data.repo_of = function(dir, cb)
+      local name = dir:match("^/work/([%w]+)")
+      cb(name and { root = "/work/" .. name, name = name } or nil)
+    end
     data.changed = function(paths, cb)
       local set = {}
       for _, p in ipairs(paths) do
@@ -61,7 +66,7 @@ describe("atlas.sidebar", function()
     if sidebar_text() then
       sidebar.toggle() -- close
     end
-    data.sessions, data.touched, data.pr_status, data.changed = real.sessions, real.touched, real.pr_status, real.changed
+    data.sessions, data.touched, data.pr_status, data.changed, data.repo_of = real.sessions, real.touched, real.pr_status, real.changed, real.repo_of
     sidebar.configure({ poll_ms = 5000, pr_poll_ms = 30000 })
     vim.cmd("silent! tabclose")
     vim.fn.delete("/tmp/atlas-sb", "rf")
@@ -182,6 +187,59 @@ describe("atlas.sidebar", function()
       return t and t:find("repo-noted", 1, true) ~= nil
     end))
     vim.fn.delete(vim.fn.stdpath("state") .. "/nvim-atlas/annotations/" .. sid .. ".json")
+  end)
+
+  it("groups sessions under the repo that owns their folder", function()
+    state.sessions = {
+      { session_id = "a", state = "done", title = "alpha work", cwd = "/work/alpha", since = os.time() },
+      { session_id = "b", state = "input", title = "alpha other", cwd = "/work/alpha-feature", since = os.time() },
+      { session_id = "c", state = "working", title = "beta work", cwd = "/work/beta", since = os.time() },
+    }
+    state.touched = {}
+
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("beta work", 1, true) ~= nil
+    end))
+    local lines = vim.split(sidebar_text(), "\n")
+    -- alpha first (one of its sessions needs input), both its sessions
+    -- under it, then beta.
+    assert.are.same({ "▾ alpha", "▾ beta" }, vim.tbl_filter(function(l)
+      return l:match("^▾") ~= nil
+    end, lines))
+    local text = table.concat(lines, "\n")
+    local alpha_at = text:find("▾ alpha", 1, true)
+    local beta_at = text:find("▾ beta", 1, true)
+    assert.is_true(alpha_at < text:find("alpha other", 1, true))
+    assert.is_true(text:find("alpha work", 1, true) < beta_at)
+    assert.is_true(beta_at < text:find("beta work", 1, true))
+  end)
+
+  it("starts a new worktree in the repo under the cursor with n", function()
+    state.sessions = { { session_id = "a", state = "done", title = "alpha work", cwd = "/work/alpha", since = os.time() } }
+    state.touched = {}
+    local spawn = require("atlas.spawn")
+    local real_prompt = spawn.prompt
+    local asked_root
+    spawn.prompt = function(root, cb)
+      asked_root = root
+      cb(false)
+    end
+
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("alpha work", 1, true) ~= nil
+    end))
+    -- Cursor on the session row: `n` uses its repo.
+    local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 2, 0 })
+    vim.api.nvim_feedkeys("n", "x", false)
+    spawn.prompt = real_prompt
+
+    assert.are.equal("/work/alpha", asked_root)
   end)
 
   it("hides worktrees that no longer exist on disk", function()
