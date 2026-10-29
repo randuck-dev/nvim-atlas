@@ -41,6 +41,8 @@ describe("atlas.sidebar", function()
       cb({ ["/tmp/atlas-sb/repo-a"] = { number = 42, state = "OPEN", checks = "passing" } })
     end
     sidebar.configure({ poll_ms = 100, pr_poll_ms = 60000 })
+    -- The sidebar hides worktrees that don't exist on disk.
+    vim.fn.mkdir("/tmp/atlas-sb/repo-a", "p")
     vim.cmd("tabnew")
   end)
 
@@ -51,6 +53,7 @@ describe("atlas.sidebar", function()
     data.sessions, data.touched, data.pr_status = real.sessions, real.touched, real.pr_status
     sidebar.configure({ poll_ms = 5000, pr_poll_ms = 30000 })
     vim.cmd("silent! tabclose")
+    vim.fn.delete("/tmp/atlas-sb", "rf")
   end)
 
   it("lists sessions with their touched worktrees and PR/CI status", function()
@@ -97,6 +100,16 @@ describe("atlas.sidebar", function()
     local calls_after_close = pr_calls
     vim.wait(400)
     assert.are.equal(calls_after_close, pr_calls)
+  end)
+
+  it("hides worktrees that no longer exist on disk", function()
+    state.touched[1].paths["/tmp/atlas-sb/gone"] = os.time()
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("repo-a", 1, true) ~= nil
+    end))
+    assert.falsy(sidebar_text():find("gone", 1, true))
   end)
 
   it("shows a pending-notes badge on a worktree", function()

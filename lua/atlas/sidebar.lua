@@ -100,6 +100,17 @@ local function ensure_buf()
     end
   end, "atlas: copy pending notes for worktree under cursor")
 
+  map("X", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if row and row.kind == "session" then
+      require("atlas.cleanup").run(row.paths, function(removed)
+        if removed > 0 then
+          M.refresh(true)
+        end
+      end)
+    end
+  end, "atlas: clean up this session's finished worktrees")
+
   map("s", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
     if row and row.kind == "session" then
@@ -149,8 +160,21 @@ local function render(sessions, touched, pr_by_path)
     if elapsed ~= "" then
       line = line .. "  " .. elapsed
     end
+    -- Worktrees that no longer exist (e.g. removed by cleanup) are
+    -- dropped right away, not after claude-status's 14-day expiry.
+    local t = by_session[session.session_id]
+    local paths = {}
+    if t then
+      for p, _ in pairs(t.paths) do
+        if vim.fn.isdirectory(p) == 1 then
+          paths[#paths + 1] = p
+        end
+      end
+      table.sort(paths)
+    end
+
     lines[#lines + 1] = line
-    rows[#lines] = { kind = "session", session_id = session.session_id }
+    rows[#lines] = { kind = "session", session_id = session.session_id, paths = paths }
 
     local glyph_hl = STATE_HL[session.state]
     if glyph_hl then
@@ -161,10 +185,7 @@ local function render(sessions, touched, pr_by_path)
       highlights[#highlights + 1] = { #lines - 1, suffix_start, #line, "Comment" }
     end
 
-    local t = by_session[session.session_id]
-    if t then
-      local paths = vim.tbl_keys(t.paths)
-      table.sort(paths)
+    do
       for _, path in ipairs(paths) do
         local name = vim.fn.fnamemodify(path, ":t")
         local wline = "    " .. name
