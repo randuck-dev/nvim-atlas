@@ -40,6 +40,7 @@ describe("atlas.sidebar", function()
       pr_calls = pr_calls + 1
       cb({ ["/tmp/atlas-sb/repo-a"] = { number = 42, state = "OPEN", checks = "passing" } })
     end
+    sidebar._reset()
     sidebar.configure({ poll_ms = 100, pr_poll_ms = 60000 })
     -- The sidebar hides worktrees that don't exist on disk.
     vim.fn.mkdir("/tmp/atlas-sb/repo-a", "p")
@@ -100,6 +101,43 @@ describe("atlas.sidebar", function()
     local calls_after_close = pr_calls
     vim.wait(400)
     assert.are.equal(calls_after_close, pr_calls)
+  end)
+
+  it("shows sessions without waiting for slow PR/CI status, then adds it", function()
+    local deliver_prs
+    data.pr_status = function(_, cb)
+      pr_calls = pr_calls + 1
+      deliver_prs = function()
+        cb({ ["/tmp/atlas-sb/repo-a"] = { number = 77, state = "OPEN", checks = "pending" } })
+      end
+    end
+
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("first session", 1, true) ~= nil
+    end), "sessions should render while gh is still running")
+    assert.falsy(sidebar_text():find("#77", 1, true))
+
+    deliver_prs() -- gh finally answers
+    assert.is_true(wait_for(function()
+      return sidebar_text():find("#77", 1, true) ~= nil
+    end))
+  end)
+
+  it("shows the last known state instantly when reopened", function()
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("first session", 1, true) ~= nil
+    end))
+    sidebar.toggle() -- close
+
+    -- From now on claude-status never answers; reopening must still show
+    -- the previous list immediately, not a blank or loading sidebar.
+    data.sessions = function() end
+    sidebar.toggle()
+    assert.truthy(sidebar_text():find("first session", 1, true))
   end)
 
   it("hides worktrees that no longer exist on disk", function()

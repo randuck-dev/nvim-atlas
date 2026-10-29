@@ -223,57 +223,72 @@ local function is_open()
   return buf ~= nil and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) ~= -1
 end
 
---- Re-reads claude-status and re-renders. PR/CI status comes from the
---- cache unless it's older than pr_poll_ms or `force` is set. Skipped
---- while another refresh is still running, or when the sidebar is closed.
+-- Last local data rendered, so reopening the sidebar (or a PR fetch
+-- finishing) can render instantly without waiting on claude-status.
+local last = nil -- { sessions, touched }
+local pr_in_flight = false
+
+local function render_last()
+  if last and is_open() then
+    render(vim.deepcopy(last.sessions), last.touched, pr_cache)
+  end
+end
+
+-- GitHub PR/CI status is slow (measured ~2s for 4 worktrees: a git call
+-- per worktree plus a `gh pr list` per repo, over the network), so it
+-- never blocks a render: fetch in the background, re-render on arrival.
+local function refresh_prs(touched)
+  if pr_in_flight then
+    return
+  end
+  pr_in_flight = true
+  local paths, seen = {}, {}
+  for _, t in ipairs(touched) do
+    for path, _ in pairs(t.paths) do
+      if not seen[path] then
+        seen[path] = true
+        paths[#paths + 1] = path
+      end
+    end
+  end
+  data.pr_status(paths, function(pr_by_path)
+    pr_in_flight = false
+    pr_cache = pr_by_path
+    pr_fetched_at = vim.uv.now()
+    render_last()
+  end)
+end
+
+--- Re-reads claude-status and re-renders right away with the PR/CI
+--- status cached so far. If that status is older than pr_poll_ms (or
+--- `force` is set) it's refetched in the background and the sidebar
+--- re-renders when it arrives. Skipped while another local refresh is
+--- still running.
 function M.refresh(force)
   if in_flight then
     return
   end
   in_flight = true
-  local function done()
-    in_flight = false
-  end
 
   data.sessions(function(sessions, err)
     if err then
-      done()
+      in_flight = false
       vim.notify("atlas: " .. err, vim.log.levels.ERROR)
       return
     end
     data.touched(function(touched, terr)
+      in_flight = false
       if terr then
-        done()
         vim.notify("atlas: " .. terr, vim.log.levels.ERROR)
         return
       end
 
-      local function finish()
-        done()
-        if is_open() then
-          render(sessions, touched, pr_cache)
-        end
-      end
+      last = { sessions = sessions, touched = touched }
+      render_last()
 
-      if not force and vim.uv.now() - pr_fetched_at < config.pr_poll_ms then
-        finish()
-        return
+      if force or vim.uv.now() - pr_fetched_at >= config.pr_poll_ms then
+        refresh_prs(touched)
       end
-
-      local paths, seen = {}, {}
-      for _, t in ipairs(touched) do
-        for path, _ in pairs(t.paths) do
-          if not seen[path] then
-            seen[path] = true
-            paths[#paths + 1] = path
-          end
-        end
-      end
-      data.pr_status(paths, function(pr_by_path)
-        pr_cache = pr_by_path
-        pr_fetched_at = vim.uv.now()
-        finish()
-      end)
     end)
   end)
 end
@@ -302,6 +317,13 @@ local function start_polling()
   )
 end
 
+--- Forgets cached state and in-flight flags (for tests).
+function M._reset()
+  stop_polling()
+  in_flight, pr_in_flight = false, false
+  last, pr_cache, pr_fetched_at = nil, {}, 0
+end
+
 --- True while the background refresh timer is running (for tests).
 function M._polling()
   return timer ~= nil and not timer:is_closing()
@@ -326,6 +348,13 @@ function M.toggle()
   vim.wo[0].number = false
   vim.wo[0].signcolumn = "no"
   vim.wo[0].wrap = false
+  if last then
+    render_last() -- instant: what it showed last time
+  else
+    vim.bo[b].modifiable = true
+    vim.api.nvim_buf_set_lines(b, 0, -1, false, { "loading sessions…" })
+    vim.bo[b].modifiable = false
+  end
   M.refresh(true)
   start_polling()
 end
