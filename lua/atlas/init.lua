@@ -7,6 +7,7 @@ local M = {}
 function M.setup(opts)
   opts = opts or {}
   data.configure(opts)
+  sidebar.configure({ poll_ms = opts.poll_ms, pr_poll_ms = opts.pr_poll_ms })
 
   vim.api.nvim_create_user_command("AtlasToggle", sidebar.toggle, {})
   -- `range = true`: with no explicit range (normal mode, "AtlasAnnotate")
