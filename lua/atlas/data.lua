@@ -6,8 +6,35 @@
 
 local M = {}
 
+-- Where claude-status/git-review actually live, if $PATH doesn't already
+-- have them (Neovim's launch environment often differs from an
+-- interactive shell that's sourced .zshrc — a GUI/terminal-launch gotcha,
+-- not anything specific to this plugin). nil means: trust $PATH as-is.
+-- Set via atlas.setup({ bin_dir = ... }); deliberately not hardcoded here
+-- so this repo stays installable without assuming any one person's dotfiles layout.
+local bin_dir = nil
+
+function M.configure(opts)
+  opts = opts or {}
+  bin_dir = opts.bin_dir and vim.fn.expand(opts.bin_dir) or nil
+end
+
+local function resolve(cmd)
+  if bin_dir then
+    local candidate = bin_dir .. "/" .. cmd
+    if vim.fn.executable(candidate) == 1 then
+      return candidate
+    end
+  end
+  return cmd
+end
+M._resolve = resolve
+
 local function run(cmd, cb)
-  vim.system(cmd, { text = true }, function(result)
+  -- vim.system throws synchronously on a spawn failure (e.g. ENOENT)
+  -- rather than reporting it through the result callback, so that has to
+  -- be caught here too, not just a non-zero exit code below.
+  local ok, err_or_handle = pcall(vim.system, cmd, { text = true }, function(result)
     vim.schedule(function()
       if result.code ~= 0 then
         cb(false, vim.trim(result.stderr or ""))
@@ -16,6 +43,11 @@ local function run(cmd, cb)
       end
     end)
   end)
+  if not ok then
+    vim.schedule(function()
+      cb(false, "failed to run `" .. table.concat(cmd, " ") .. "`: " .. tostring(err_or_handle))
+    end)
+  end
 end
 
 local function run_json(cmd, cb)
@@ -56,19 +88,19 @@ end
 --- All live Claude Code sessions: array of {state, cwd, tmux_pane,
 --- session_id, pid, updated, since, transcript, title, detail, last_prompt}.
 function M.sessions(cb)
-  run_json({ "claude-status", "json" }, cb)
+  run_json({ resolve("claude-status"), "json" }, cb)
 end
 
 --- Worktrees touched by each session (live, or ended within 14 days):
 --- array of {session_id, cwd, title, transcript, updated, paths, live},
 --- where `paths` maps a touched worktree path to its last-touched epoch.
 function M.touched(cb)
-  run_json({ "claude-status", "touched" }, cb)
+  run_json({ resolve("claude-status"), "touched" }, cb)
 end
 
 --- "<merge-base-sha> <target-ref>" for `dir`, via `git-review --base`.
 function M.merge_base(dir, cb)
-  run({ "git-review", "--base", dir }, function(ok, out)
+  run({ resolve("git-review"), "--base", dir }, function(ok, out)
     if not ok then
       cb(nil, nil, out)
       return

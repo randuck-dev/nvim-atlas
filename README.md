@@ -13,7 +13,12 @@ standalone (non-Neovim) tool.
 
 - [`claude-status`](https://github.com/randuck-dev/dotfiles/blob/main/bin/claude-status)
   and [`git-review`](https://github.com/randuck-dev/dotfiles/blob/main/bin/git-review)
-  on `$PATH` — session/worktree tracking and merge-base diffing.
+  on `$PATH` — session/worktree tracking and merge-base diffing. If
+  Neovim's own launch environment doesn't have them on `$PATH` (common
+  for GUI/terminal-launched Neovim, which doesn't always inherit an
+  interactive shell's sourced `.zshrc`/`.bashrc`), pass `bin_dir` to
+  `setup()` instead of trying to fix `$PATH` globally:
+  `require("atlas").setup({ bin_dir = "~/.dotfiles/bin" })`.
 - [`gh`](https://cli.github.com/) — PR/CI status.
 - [`diffview.nvim`](https://github.com/sindrets/diffview.nvim) and
   [`toggleterm.nvim`](https://github.com/akinsho/toggleterm.nvim).
