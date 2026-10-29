@@ -10,6 +10,7 @@ local data = require("atlas.data")
 local review = require("atlas.review")
 local annotate = require("atlas.annotate")
 local deliver = require("atlas.deliver")
+local peek = require("atlas.peek")
 
 local M = {}
 
@@ -71,11 +72,10 @@ local function ensure_buf()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
     if row and row.kind == "worktree" then
       review.open(row.path, row.session_id)
+    elseif row and row.kind == "session" then
+      peek.open(row.session_id)
     end
-    -- Enter on a session row is deliberately a no-op for now: jumping
-    -- into the session itself (its terminal) is still an open question
-    -- the user hasn't settled on, not something to guess at.
-  end, "atlas: review worktree under cursor")
+  end, "atlas: review worktree / peek session under cursor")
 
   map("y", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
