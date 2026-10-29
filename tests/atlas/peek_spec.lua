@@ -200,6 +200,77 @@ describe("atlas.peek (real tmux client on a grouped view session)", function()
     assert.is_true(session_exists(name))
   end)
 
+  it("renders a full-screen TUI exactly as tmux has it", function()
+    -- The earlier snapshot-based version garbled TUIs that redraw parts
+    -- of the screen. A real client shouldn't: compare the view with
+    -- tmux's own capture of the pane while Vim (cursor moves, partial
+    -- redraws, a status line) runs in it.
+    local main_win = open_sidebar_and_main_window()
+    local name, pane = new_session()
+    table.insert(to_kill, name)
+    local file = vim.fn.tempname()
+    local content = {}
+    for i = 1, 60 do
+      content[i] = string.format("line %02d of a file being edited in a TUI", i)
+    end
+    vim.fn.writefile(content, file)
+    sh({ "tmux", "send-keys", "-t", pane, "vim -u NONE -N " .. file, "Enter" })
+    vim.wait(800)
+    mock_sessions({ { session_id = "s1", tmux_pane = pane, state = "done" } })
+
+    peek.open("s1")
+    local buf = vim.api.nvim_win_get_buf(main_win)
+    vim.wait(800)
+    -- Partial redraws: scroll, jump, search.
+    for _, keys in ipairs({ "20j", "gg", "G", "/line 33", "Enter" }) do
+      if keys == "Enter" then
+        sh({ "tmux", "send-keys", "-t", pane, "Enter" })
+      else
+        sh({ "tmux", "send-keys", "-t", pane, keys })
+      end
+      vim.wait(150)
+    end
+
+    local function view_lines()
+      local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+      local out = {}
+      for i, l in ipairs(lines) do
+        out[i] = l:gsub("%s+$", "")
+      end
+      return out
+    end
+    local function pane_lines()
+      local _, out = sh({ "tmux", "capture-pane", "-p", "-t", pane })
+      local res = {}
+      for l in (out .. "\n"):gmatch("(.-)\n") do
+        res[#res + 1] = l:gsub("%s+$", "")
+      end
+      return res
+    end
+
+    local matched = vim.wait(3000, function()
+      local v, p = view_lines(), pane_lines()
+      for i = 1, #p do
+        if v[i] ~= p[i] then
+          return false
+        end
+      end
+      return #p > 0
+    end, 100)
+    if not matched then
+      local v, p = view_lines(), pane_lines()
+      for i = 1, #p do
+        if v[i] ~= p[i] then
+          error(string.format("row %d differs:\n view: %q\n pane: %q", i, tostring(v[i]), p[i]))
+        end
+      end
+    end
+    assert.truthy(table.concat(view_lines(), "\n"):find("line 33", 1, true))
+
+    sh({ "tmux", "send-keys", "-t", pane, "Escape", ":qa!", "Enter" })
+    vim.fn.delete(file)
+  end)
+
   it("refuses a pane value that isn't a tmux pane id", function()
     open_sidebar_and_main_window()
     mock_sessions({ { session_id = "s1", tmux_pane = "not-a-pane", state = "done" } })
