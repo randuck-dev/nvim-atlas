@@ -13,7 +13,7 @@ local annotate = require("atlas.annotate")
 -- across repeated runs), this is actually unique per call.
 local created_sids = {}
 local function fresh_session_id()
-  local sid = "atlas-test-" .. tostring(vim.loop.hrtime())
+  local sid = "atlas-test-" .. string.format("%d", vim.loop.hrtime())
   created_sids[#created_sids + 1] = sid
   return sid
 end

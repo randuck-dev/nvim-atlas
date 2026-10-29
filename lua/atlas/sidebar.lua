@@ -84,6 +84,17 @@ local function ensure_buf()
     end
   end, "atlas: copy pending notes for worktree under cursor")
 
+  map("s", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if row and row.kind == "session" then
+      deliver.send(row.session_id, function(ok)
+        if ok then
+          M.refresh()
+        end
+      end)
+    end
+  end, "atlas: send all pending notes into this session")
+
   map("r", M.refresh, "atlas: refresh")
   map("q", function()
     vim.cmd("close")
