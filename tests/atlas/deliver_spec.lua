@@ -49,14 +49,37 @@ describe("atlas.deliver.format_for_worktree", function()
   end)
 end)
 
+-- Creates a disposable session and returns its pane id ("%N"). Asserts
+-- the id is real: an empty target would make tmux fall back to the
+-- current pane, i.e. the developer's own session.
 local function new_pane(name)
   vim.system({ "tmux", "new-session", "-d", "-s", name, "-x", "80", "-y", "24" }):wait()
-  return name
+  local r = vim.system({ "tmux", "list-panes", "-t", "=" .. name .. ":", "-F", "#{pane_id}" }, { text = true }):wait()
+  local pane = vim.trim(r.stdout or "")
+  assert(pane:match("^%%%d+$"), "could not resolve pane id for test session " .. name)
+  return pane
 end
 
-local function kill_pane(name)
-  vim.system({ "tmux", "kill-session", "-t", name }):wait()
+-- Kills the session that owns `pane`.
+local function kill_pane(pane)
+  vim.system({ "tmux", "kill-session", "-t", pane }):wait()
 end
+
+describe("atlas.deliver.is_pane_id", function()
+  it("accepts real pane ids and rejects anything tmux could resolve to the current pane", function()
+    assert.is_true(deliver.is_pane_id("%12"))
+    assert.is_false(deliver.is_pane_id(""))
+    assert.is_false(deliver.is_pane_id(nil))
+    assert.is_false(deliver.is_pane_id("some-session"))
+    assert.is_false(deliver.is_pane_id("%12; rm"))
+  end)
+
+  it("refuses to send to a non-pane-id target", function()
+    local ok, err = deliver._tmux_paste("", "hello")
+    assert.is_false(ok)
+    assert.truthy(err:find("not a tmux pane id", 1, true))
+  end)
+end)
 
 local function capture(pane)
   local r = vim.system({ "tmux", "capture-pane", "-t", pane, "-p" }, { text = true }):wait()

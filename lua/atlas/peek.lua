@@ -1,80 +1,56 @@
 -- A real, interactive terminal onto a session's tmux pane, inside
 -- Neovim: tmux is the backend, Neovim is the orchestration interface.
 --
--- Output: a continuous `tmux pipe-pane` relay (through a fifo, read by
--- our own long-running `cat` job) forwards new bytes as they're
--- produced -- verified directly against a real pane that a single
--- continuous relay delivers everything written after it starts.
--- PLUS a periodic full resync (`capture-pane` snapshot + clear +
--- redraw, every few seconds): our local terminal emulator only
--- approximates the real pane's state from a snapshot, it isn't the
--- single source of truth the way tmux's own `attach` is, so complex
--- full-screen TUIs that do cursor-relative partial redraws (confirmed
--- directly against a real Claude Code session: fragments like
--- "pi.nvim_open_term(buf, {" showed up, meaning our copy had drifted
--- out of sync) can drift from reality over time. The periodic resync
--- bounds how bad that drift gets rather than letting it compound
--- forever; it doesn't eliminate the possibility, true frame-perfect
--- mirroring of an arbitrary TUI would need tmux's own control-mode
--- protocol, a materially bigger piece of work than this.
+-- How: a real `tmux attach` client runs in a Neovim terminal buffer,
+-- attached to a throwaway *grouped* view session (`new-session -t`),
+-- which shares the target session's windows but has its own options.
+-- Its status bar is turned off for the view session only, so the
+-- user's real session keeps its own. tmux itself does all rendering,
+-- input and resizing, so complex TUIs (like Claude Code) render
+-- exactly as in a normal tmux client.
 --
--- Input: nvim_open_term's on_input forwards whatever you type straight
--- into the real pane via `tmux send-keys -l`, so this is genuinely
--- interactive, not read-only.
+-- An earlier version re-emulated the pane from capture-pane snapshots
+-- plus a pipe-pane byte relay. That drifted out of sync on TUIs doing
+-- cursor-relative redraws (garbled fragments, a skewed cursor), because
+-- our copy was never the source of truth. Attaching a real client
+-- removes that whole class of problem instead of patching around it.
 --
 -- Lives in the window next to the sidebar (taking over whatever buffer
--- was there), not a floating modal -- a normal buffer you switch into
--- and out of like any other.
+-- was there), not a floating modal. One view at a time: opening another
+-- session tears the previous view session and client down first.
 
 local data = require("atlas.data")
 
 local M = {}
 
-local function capture_ansi(pane, cb)
-  vim.system({ "tmux", "capture-pane", "-e", "-p", "-t", pane }, { text = true }, function(result)
-    vim.schedule(function()
-      cb(result.code == 0 and (result.stdout or "") or nil)
-    end)
-  end)
+local function tmux(args)
+  local r = vim.system(vim.list_extend({ "tmux" }, args), { text = true }):wait()
+  return r.code == 0, vim.trim(r.stdout or ""), vim.trim(r.stderr or "")
 end
-M._capture = capture_ansi
 
--- capture-pane's text dump doesn't say where the cursor actually is, so
--- after writing it our local cursor lands wherever the content happened
--- to leave it -- not necessarily where the real pane's cursor is. The
--- live relay's bytes assume the correct position (that's what the real
--- program they came from assumed), so a mismatch here means every
--- cursor-relative update afterward renders at the wrong row/col.
--- Confirmed directly: tmux reports this via its own format variables.
-local function get_cursor_pos(pane, cb)
-  vim.system({ "tmux", "display-message", "-p", "-t", pane, "#{cursor_x} #{cursor_y}" }, { text = true }, function(result)
-    vim.schedule(function()
-      if result.code ~= 0 then
-        cb(nil, nil)
-        return
-      end
-      local x, y = (result.stdout or ""):match("(%d+)%s+(%d+)")
-      cb(tonumber(x), tonumber(y))
-    end)
-  end)
+-- Exact-match session target. The trailing ":" matters: tmux accepts
+-- "=name" for kill-session/has-session, but set-option and
+-- show-options reject it ("no such session") -- which silently left
+-- the view's status bar on. "=name:" works for all of them.
+local function sess(name)
+  return "=" .. name .. ":"
 end
-M._cursor_pos = get_cursor_pos
 
--- tmux's cursor_x/cursor_y are 0-indexed; CUP (\27[row;colH) is 1-indexed.
-local function cup(x, y)
-  return string.format("\27[%d;%dH", y + 1, x + 1)
-end
-M._cup = cup
+-- { buf, job, view } for the one live view, or nil.
+local current = nil
 
--- Singleton: only one interactive peek is ever live at a time, so
--- switching sessions always tears the previous one down first (reader
--- job, tmux pipe-pane, fifo) rather than leaking any of them.
-local current = nil -- { buf, win, chan, pane, fifo, reader }
+-- Quitting Neovim with a view open must not leave its session behind.
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  callback = function()
+    if current then
+      M.close()
+    end
+  end,
+})
 
---- The current peek's reader job handle (or nil) -- exposed for tests
---- to assert it actually gets killed when switching sessions.
-function M._current_reader()
-  return current and current.reader
+--- The current view's grouped tmux session name (or nil), for tests.
+function M._current_view()
+  return current and current.view
 end
 
 local function stop_current()
@@ -83,41 +59,12 @@ local function stop_current()
   end
   local c = current
   current = nil
-  vim.system({ "tmux", "pipe-pane", "-t", c.pane })
-  if c.reader then
-    pcall(function()
-      c.reader:kill(15)
-    end)
+  if c.job then
+    pcall(vim.fn.jobstop, c.job)
   end
-  if c.resync_timer and not c.resync_timer:is_closing() then
-    c.resync_timer:stop()
-    c.resync_timer:close()
-  end
-  vim.loop.fs_unlink(c.fifo)
+  tmux({ "kill-session", "-t", sess(c.view) })
 end
-
---- Full resync: fresh capture-pane snapshot, clear, redraw. Used both
---- for the very first paint and periodically afterward to correct any
---- drift the live byte relay accumulates.
-local function reseed(buf, chan, pane)
-  capture_ansi(pane, function(text)
-    if not current or current.buf ~= buf or not vim.api.nvim_buf_is_valid(buf) then
-      return
-    end
-    local body = (text or ""):gsub("\n", "\r\n")
-    vim.api.nvim_chan_send(chan, "\27[H\27[2J\27[3J" .. body)
-
-    get_cursor_pos(pane, function(x, y)
-      if not current or current.buf ~= buf or not vim.api.nvim_buf_is_valid(buf) then
-        return
-      end
-      if x and y then
-        vim.api.nvim_chan_send(chan, cup(x, y))
-      end
-    end)
-  end)
-end
-M._reseed = reseed
+M.close = stop_current
 
 local function find_main_window()
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
@@ -129,24 +76,47 @@ local function find_main_window()
   return nil
 end
 
---- Resizes the real tmux pane to match the Neovim window showing it, so
---- TUI apps inside it wrap/render at the right width instead of
---- whatever size the pane happened to be when attached.
-local function resize_pane_to_win(pane, win)
-  if not vim.api.nvim_win_is_valid(win) then
-    return
+--- Creates a grouped view session showing `pane` (focused, in its
+--- window), with the status bar off for the view only. Returns the
+--- view session name, or nil and an error.
+local function create_view(pane)
+  if not require("atlas.deliver").is_pane_id(pane) then
+    return nil, "not a tmux pane id: '" .. tostring(pane) .. "'"
   end
-  local cols = vim.api.nvim_win_get_width(win)
-  local rows = vim.api.nvim_win_get_height(win)
-  vim.system({ "tmux", "resize-pane", "-t", pane, "-x", tostring(cols), "-y", tostring(rows) })
+  local ok, out, err = tmux({ "display-message", "-p", "-t", pane, "#{session_id} #{window_id}" })
+  if not ok then
+    return nil, "pane " .. pane .. " not found: " .. err
+  end
+  local session_id, window_id = out:match("^(%S+)%s+(%S+)$")
+  if not session_id then
+    return nil, "unexpected tmux output: " .. out
+  end
+
+  -- Numeric names only: tmux parses '.' and ':' in targets as
+  -- window/pane separators.
+  local view = "atlas-view-" .. string.format("%d", vim.uv.hrtime())
+  ok, _, err = tmux({ "new-session", "-d", "-t", session_id, "-s", view })
+  if not ok then
+    return nil, "could not create view session: " .. err
+  end
+  -- Not destroy-unattached: set on a session with no client yet, tmux
+  -- destroys it immediately (confirmed). Cleanup happens in on_exit,
+  -- close() and VimLeavePre instead.
+  ok, _, err = tmux({ "set-option", "-t", sess(view), "status", "off" })
+  if not ok then
+    tmux({ "kill-session", "-t", sess(view) })
+    return nil, "could not hide the view session's status bar: " .. err
+  end
+  tmux({ "select-window", "-t", sess(view) .. window_id })
+  tmux({ "select-pane", "-t", pane })
+  return view
 end
 
 --- Opens a real interactive terminal onto session_id's tmux pane in the
 --- window next to the sidebar (or a new vsplit if the sidebar is the
---- only window). Type into it (`i` to enter terminal mode, same as any
---- :terminal buffer) and it goes straight into the real pane. No-ops
---- (with a warning) if the session isn't live or has no recorded tmux
---- pane.
+--- only window). `i` to type into it, `<C-\><C-n>` to get back to
+--- normal mode, `q` in normal mode to close it. No-ops (with a warning)
+--- if the session isn't live or has no recorded tmux pane.
 function M.open(session_id)
   data.sessions(function(sessions, err)
     if err then
@@ -172,80 +142,49 @@ function M.open(session_id)
 
     stop_current()
 
-    local win = find_main_window()
-    local buf = vim.api.nvim_create_buf(false, true)
-    local chan = vim.api.nvim_open_term(buf, {
-      on_input = function(_, _, _, data_in)
-        -- on_input fires once per keystroke, not batched. Independent
-        -- async spawns here can complete out of order (confirmed: fast
-        -- typing scrambled), so this blocks briefly (a few ms, a
-        -- subprocess spawn) to keep keystrokes landing in order.
-        vim.system({ "tmux", "send-keys", "-l", "-t", pane, "--", data_in }):wait()
-      end,
-    })
+    local view, view_err = create_view(pane)
+    if not view then
+      vim.notify("atlas: " .. view_err, vim.log.levels.ERROR)
+      return
+    end
 
-    if win then
-      vim.api.nvim_win_set_buf(win, buf)
-    else
+    local win = find_main_window()
+    if not win then
       vim.cmd("vsplit")
       win = vim.api.nvim_get_current_win()
-      vim.api.nvim_win_set_buf(win, buf)
     end
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(win, buf)
     vim.api.nvim_set_current_win(win)
 
-    resize_pane_to_win(pane, win)
-
-    local fifo = string.format("/tmp/atlas-peek-%s.fifo", string.format("%d", vim.loop.hrtime()))
-    vim.loop.fs_unlink(fifo) -- in case a stale one from a previous crash exists
-    vim.system({ "mkfifo", fifo }):wait()
-
-    current = { buf = buf, win = win, chan = chan, pane = pane, fifo = fifo }
-
-    -- Paint the current screen immediately, start the live relay for
-    -- everything from this point on, and resync periodically to bound
-    -- drift for TUIs that do complex partial/relative redraws.
-    reseed(buf, chan, pane)
-
-    current.reader = vim.system({ "cat", fifo }, {
-      stdout = function(_, chunk)
-        if chunk and current and current.buf == buf then
-          vim.schedule(function()
-            if vim.api.nvim_buf_is_valid(buf) then
-              vim.api.nvim_chan_send(chan, chunk)
-            end
-          end)
+    -- jobstart(term=true) runs in the current buffer. TMUX is unset so
+    -- tmux allows a client inside a tmux-hosted Neovim.
+    local job = vim.fn.jobstart({ "env", "-u", "TMUX", "tmux", "attach-session", "-t", sess(view) }, {
+      term = true,
+      on_exit = function()
+        -- The client is gone (detached, killed, or the pane closed):
+        -- don't leave the view session behind.
+        tmux({ "kill-session", "-t", sess(view) })
+        if current and current.buf == buf then
+          current = nil
         end
       end,
     })
+    if job <= 0 then
+      tmux({ "kill-session", "-t", sess(view) })
+      vim.notify("atlas: could not start tmux client", vim.log.levels.ERROR)
+      return
+    end
 
-    vim.system({ "tmux", "pipe-pane", "-o", "-t", pane, "cat > " .. fifo })
+    current = { buf = buf, job = job, view = view }
 
-    local resync_timer = vim.uv.new_timer()
-    current.resync_timer = resync_timer
-    resync_timer:start(
-      3000,
-      3000,
-      vim.schedule_wrap(function()
-        if current and current.buf == buf then
-          reseed(buf, chan, pane)
-        end
-      end)
-    )
-
-    vim.keymap.set("n", "q", stop_current, { buffer = buf, nowait = true, desc = "atlas: close interactive peek" })
-    vim.api.nvim_create_autocmd({ "BufHidden", "BufWinLeave" }, {
+    vim.keymap.set("n", "q", stop_current, { buffer = buf, nowait = true, desc = "atlas: close session view" })
+    vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, {
       buffer = buf,
       once = true,
       callback = function()
         if current and current.buf == buf then
           stop_current()
-        end
-      end,
-    })
-    vim.api.nvim_create_autocmd("WinResized", {
-      callback = function()
-        if current and current.buf == buf and vim.tbl_contains(vim.v.event.windows, win) then
-          resize_pane_to_win(pane, win)
         end
       end,
     })

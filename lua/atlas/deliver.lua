@@ -57,7 +57,17 @@ end
 --- so embedded newlines land as literal content instead of getting
 --- executed line-by-line (verified directly: without this, each line
 --- runs as a separate command). Does not submit it.
+--- True for a real tmux pane id ("%12"). Anything else must never reach
+--- `tmux send-keys -t`: an empty or unresolvable target makes tmux fall
+--- back to the current pane, i.e. whatever the user is looking at.
+function M.is_pane_id(pane)
+  return type(pane) == "string" and pane:match("^%%%d+$") ~= nil
+end
+
 local function tmux_paste(pane, text)
+  if not M.is_pane_id(pane) then
+    return false, "not a tmux pane id: '" .. tostring(pane) .. "'"
+  end
   local result = vim.system(
     { "tmux", "send-keys", "-l", "-t", pane, BRACKETED_PASTE_START .. text .. BRACKETED_PASTE_END },
     { text = true }
@@ -71,6 +81,9 @@ M._tmux_paste = tmux_paste
 
 --- Presses a real Enter in tmux pane `pane`, submitting whatever's there.
 local function tmux_submit(pane)
+  if not M.is_pane_id(pane) then
+    return false, "not a tmux pane id: '" .. tostring(pane) .. "'"
+  end
   local result = vim.system({ "tmux", "send-keys", "-t", pane, "Enter" }, { text = true }):wait()
   if result.code ~= 0 then
     return false, vim.trim(result.stderr or "")
