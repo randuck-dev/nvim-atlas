@@ -44,6 +44,11 @@ function M.classify(path, pr)
     return item
   end
   item.common_dir = common
+  -- A session's folder can be a subfolder; removal needs the worktree root.
+  local _, top = git(path, { "rev-parse", "--show-toplevel" })
+  if top ~= "" then
+    item.path = top
+  end
 
   local _, branch = git(path, { "rev-parse", "--abbrev-ref", "HEAD" })
   if branch == "" or branch == "HEAD" then
@@ -104,20 +109,57 @@ local function summary(items)
   local lines = {}
   for _, it in ipairs(items) do
     local name = vim.fn.fnamemodify(it.path, ":t")
-    lines[#lines + 1] = string.format("  %s %s (%s)", it.safe and "remove" or "keep  ", name, it.reason)
+    local note = it.own and it.safe and ", closes the session" or ""
+    lines[#lines + 1] = string.format("  %s %s (%s%s)", it.safe and "remove" or "keep  ", name, it.reason, note)
   end
   return table.concat(lines, "\n")
 end
 
---- Asks before removing session_id's finished worktrees, then removes
---- the safe ones. `paths` are the session's touched worktree paths.
+--- Closes the tmux pane a session runs in, so its worktree can go.
+local function close_pane(pane)
+  if not require("atlas.deliver").is_pane_id(pane) then
+    return false, "no valid tmux pane for the session"
+  end
+  local r = vim.system({ "tmux", "kill-pane", "-t", pane }, { text = true }):wait()
+  if r.code ~= 0 then
+    return false, "could not close the session's pane: " .. vim.trim(r.stderr or "")
+  end
+  return true
+end
+
+--- Asks before removing a session's finished worktrees, then removes
+--- the safe ones. `paths` are the worktrees it touched outside its own
+--- folder. opts.own = { path, pane }: the session's own folder and tmux
+--- pane -- if that folder is a linked worktree that's safe to remove,
+--- it's offered too, and confirming closes the session's pane first
+--- (a worktree with a live session inside it isn't finished).
 --- Calls cb(removed_count) when done (or 0 if cancelled / nothing to do).
-function M.run(paths, cb)
+function M.run(paths, cb, opts)
   cb = cb or function() end
-  data.pr_status(paths, function(pr_by_path)
+  opts = opts or {}
+  local all = vim.list_extend({}, paths)
+  if opts.own and opts.own.path then
+    all[#all + 1] = opts.own.path
+  end
+  data.pr_status(all, function(pr_by_path)
     local items = {}
     for _, p in ipairs(paths) do
       items[#items + 1] = M.classify(p, pr_by_path[p])
+    end
+    if opts.own and opts.own.path then
+      local own = M.classify(opts.own.path, pr_by_path[opts.own.path])
+      own.own = true
+      own.pane = opts.own.pane
+      -- Never remove a worktree twice if it was also in `paths`.
+      local dup = false
+      for _, it in ipairs(items) do
+        if it.path == own.path then
+          dup = true
+        end
+      end
+      if not dup then
+        items[#items + 1] = own
+      end
     end
     local safe = vim.tbl_filter(function(it)
       return it.safe
@@ -138,7 +180,17 @@ function M.run(paths, cb)
       end
       local removed, failures = 0, {}
       for _, it in ipairs(safe) do
-        local ok, err = M.remove(it)
+        local ok, err = true, nil
+        if it.own then
+          ok, err = close_pane(it.pane)
+          if ok then
+            -- Give the shell/claude a moment to exit before git checks the tree.
+            vim.wait(300)
+          end
+        end
+        if ok then
+          ok, err = M.remove(it)
+        end
         if ok then
           removed = removed + 1
         else

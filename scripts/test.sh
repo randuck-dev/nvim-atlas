@@ -20,4 +20,4 @@ fi
 git -C "$deps/diffview.nvim" checkout -q "$diffview_rev"
 
 nvim --headless --noplugin -u tests/minimal_init.lua \
-  -c "PlenaryBustedDirectory tests/atlas { minimal_init = 'tests/minimal_init.lua' }"
+  -c "PlenaryBustedDirectory tests/atlas { minimal_init = 'tests/minimal_init.lua', sequential = true, timeout = 300000 }"

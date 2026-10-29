@@ -108,7 +108,7 @@ local function ensure_buf()
         if removed > 0 then
           M.refresh(true)
         end
-      end)
+      end, { own = { path = row.cwd, pane = row.pane } })
     end
   end, "atlas: clean up this session's finished worktrees")
 
@@ -247,7 +247,14 @@ local function render(sessions, touched, pr_by_path, changed, repos)
       -- Cleanup gets every existing worktree, including hidden ones: a
       -- merged, clean worktree has "no changes" and is exactly what
       -- cleanup should remove.
-      rows[#lines] = { kind = "session", session_id = session.session_id, paths = all_paths, root = g.root }
+      rows[#lines] = {
+        kind = "session",
+        session_id = session.session_id,
+        paths = all_paths,
+        root = g.root,
+        cwd = session.cwd,
+        pane = session.tmux_pane,
+      }
 
       local glyph_hl = STATE_HL[session.state]
       if glyph_hl then

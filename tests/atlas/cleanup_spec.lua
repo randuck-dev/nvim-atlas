@@ -188,4 +188,101 @@ describe("atlas.cleanup", function()
       assert.are.equal(1, vim.fn.isdirectory(merged))
     end)
   end)
+
+  describe("run with the session's own worktree", function()
+    local data = require("atlas.data")
+    local real_pr, real_select
+    local tmux_session
+
+    local function sh(args)
+      local r = vim.system(args, { text = true }):wait()
+      return r.code == 0, vim.trim(r.stdout or "")
+    end
+
+    -- A pane running in `dir`, standing in for the session's Claude.
+    local function pane_in(dir)
+      local name = "atlas-test-cleanup-" .. string.format("%d", vim.uv.hrtime())
+      sh({ "tmux", "new-session", "-d", "-s", name, "-c", dir, "sleep 300" })
+      local _, pane = sh({ "tmux", "list-panes", "-t", "=" .. name .. ":", "-F", "#{pane_id}" })
+      assert(pane:match("^%%%d+$"), "could not resolve test pane")
+      tmux_session = name
+      return pane
+    end
+
+    local function pane_alive(pane)
+      local ok, out = sh({ "tmux", "display-message", "-p", "-t", pane, "#{pane_id}" })
+      return ok and out == pane
+    end
+
+    before_each(function()
+      real_pr, real_select = data.pr_status, vim.ui.select
+      data.pr_status = function(_, cb)
+        cb({})
+      end
+      vim.ui.select = function(choices, _, on_choice)
+        on_choice(choices[1])
+      end
+      tmux_session = nil
+    end)
+
+    after_each(function()
+      data.pr_status, vim.ui.select = real_pr, real_select
+      if tmux_session then
+        sh({ "tmux", "kill-session", "-t", "=" .. tmux_session .. ":" })
+      end
+    end)
+
+    it("closes the session's pane, then removes its finished worktree and branch", function()
+      local wt = worktree("own-done")
+      local pane = pane_in(wt)
+
+      local removed
+      cleanup.run({}, function(n)
+        removed = n
+      end, { own = { path = wt, pane = pane } })
+
+      assert.are.equal(1, removed)
+      assert.is_false(pane_alive(pane), "the session's pane should be closed")
+      assert.are.equal(0, vim.fn.isdirectory(wt))
+      assert.is_false(branch_exists("own-done"))
+    end)
+
+    it("leaves the session alone when its worktree isn't finished", function()
+      local wt = worktree("own-dirty")
+      vim.fn.writefile({ "wip" }, wt .. "/wip.txt")
+      local pane = pane_in(wt)
+
+      local removed
+      cleanup.run({}, function(n)
+        removed = n
+      end, { own = { path = wt, pane = pane } })
+
+      assert.are.equal(0, removed)
+      assert.is_true(pane_alive(pane), "an unfinished session must not be closed")
+      assert.are.equal(1, vim.fn.isdirectory(wt))
+    end)
+
+    it("never offers a main checkout, even as the session's own folder", function()
+      local pane = pane_in(root .. "/main")
+      local removed
+      cleanup.run({}, function(n)
+        removed = n
+      end, { own = { path = root .. "/main", pane = pane } })
+
+      assert.are.equal(0, removed)
+      assert.is_true(pane_alive(pane))
+      assert.are.equal(1, vim.fn.isdirectory(root .. "/main"))
+    end)
+
+    it("works from a subfolder of the worktree", function()
+      local wt = worktree("own-sub")
+      vim.fn.mkdir(wt .. "/sub", "p")
+      local pane = pane_in(wt .. "/sub")
+
+      cleanup.run({}, nil, { own = { path = wt .. "/sub", pane = pane } })
+
+      assert.are.equal(0, vim.fn.isdirectory(wt))
+      assert.is_false(branch_exists("own-sub"))
+    end)
+  end)
 end)

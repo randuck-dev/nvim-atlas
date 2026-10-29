@@ -24,7 +24,7 @@ In the sidebar:
 | `n`    | new worktree + Claude session in its repo (also on a repo row) |              |
 | `<CR>` | open the session's tmux pane (live, interactive) | review its diff (diffview)   |
 | `s`    | send all pending notes into the session  |                                      |
-| `X`    | clean up its finished worktrees          |                                      |
+| `X`    | clean up its finished worktrees, including its own (closes the session) |    |
 | `y`    |                                          | copy its pending notes               |
 | `r`    | refresh now (including PR/CI)            | same                                 |
 | `q`    | close the sidebar                        | same                                 |
@@ -42,7 +42,8 @@ the shared tmux window resizes to fit the Neovim window.
 window named after the branch running `claude`, in the background. The
 new session shows up under its repo once Claude starts.
 
-Cleanup only removes linked worktrees whose PR is merged or whose branch
+Cleanup also offers the session's own worktree (e.g. one made with
+`n`); confirming closes that session's tmux pane first. It only removes linked worktrees whose PR is merged or whose branch
 is already in its target, with no uncommitted or untracked changes. It
 asks first, and uses `git worktree remove` / `git branch -d` (never
 force). Remote branches are left alone.
