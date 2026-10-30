@@ -919,6 +919,25 @@ function M._polling()
   return timer ~= nil and not timer:is_closing()
 end
 
+--- Focuses the sidebar (if open) with the cursor on session_id's row.
+--- Returns true if it found the window.
+function M.focus_session(session_id)
+  local win = buf and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) or -1
+  if win == -1 then
+    return false
+  end
+  vim.api.nvim_set_current_win(win)
+  for lnum = 1, vim.api.nvim_buf_line_count(buf) do
+    local row = rows[lnum]
+    if row and row.kind == "session" and row.session_id == session_id then
+      vim.api.nvim_win_set_cursor(win, { lnum, 0 })
+      break
+    end
+  end
+  M.update_legend()
+  return true
+end
+
 --- Opens the sidebar pinned to the far left (like a file-explorer
 --- sidebar) if it isn't already, and refreshes it; closes it if it's
 --- already open.

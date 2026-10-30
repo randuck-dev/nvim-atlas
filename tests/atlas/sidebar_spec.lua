@@ -403,6 +403,16 @@ describe("atlas.sidebar", function()
       assert.is_nil(line_of("▾ alpha"), "a session in a section isn't also listed under its repo")
     end)
 
+    it("focus_session moves focus and the cursor to that session's row", function()
+      local win = open_and_wait("beta work")
+      vim.cmd("wincmd l") -- somewhere else, like the session view
+      assert.are_not.equal(win, vim.api.nvim_get_current_win())
+
+      assert.is_true(sidebar.focus_session("b"))
+      assert.are.equal(win, vim.api.nvim_get_current_win())
+      assert.are.equal(line_of("beta work"), vim.api.nvim_win_get_cursor(win)[1])
+    end)
+
     it("m moves a session into a chosen section", function()
       sections.add("observability")
       local win = open_and_wait("beta work")

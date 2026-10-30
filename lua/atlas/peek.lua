@@ -23,6 +23,16 @@ local data = require("atlas.data")
 
 local M = {}
 
+-- Key that leaves the view (terminal or normal mode) and jumps back to
+-- the session's row in the sidebar. Ctrl-q, because Claude Code uses
+-- Esc (interrupt) and Esc Esc (rewind) itself.
+local leave_key = "<C-q>"
+
+function M.configure(opts)
+  opts = opts or {}
+  leave_key = opts.leave_key or leave_key
+end
+
 local function tmux(args)
   local r = vim.system(vim.list_extend({ "tmux" }, args), { text = true }):wait()
   return r.code == 0, vim.trim(r.stdout or ""), vim.trim(r.stderr or "")
@@ -112,10 +122,30 @@ local function create_view(pane)
   return view
 end
 
+--- Leaves terminal mode and focuses the sidebar on session_id's row.
+--- The view keeps running next to it.
+local function back_to_sidebar(session_id)
+  vim.cmd("stopinsert")
+  vim.schedule(function()
+    require("atlas.sidebar").focus_session(session_id)
+  end)
+end
+
+--- Asks tmux to redraw the view client from scratch, so Neovim's
+--- terminal grid can't keep a stale cursor row from an earlier partial
+--- update.
+local function refresh_client(view)
+  local ok, tty = tmux({ "list-clients", "-t", sess(view), "-F", "#{client_tty}" })
+  tty = ok and tty:match("^(%S+)")
+  if tty then
+    vim.system({ "tmux", "refresh-client", "-t", tty })
+  end
+end
+
 --- Opens a real interactive terminal onto session_id's tmux pane in the
 --- window next to the sidebar (or a new vsplit if the sidebar is the
---- only window). `i` to type into it, `<C-\><C-n>` to get back to
---- normal mode, `q` in normal mode to close it. No-ops (with a warning)
+--- only window). `i` to type into it, <C-q> (configurable) to go
+--- back to the sidebar, `q` in normal mode to close it. No-ops (with a warning)
 --- if the session isn't live or has no recorded tmux pane.
 function M.open(session_id)
   data.sessions(function(sessions, err)
@@ -156,6 +186,9 @@ function M.open(session_id)
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_win_set_buf(win, buf)
     vim.api.nvim_set_current_win(win)
+    -- Set before the client starts, so its first size already accounts
+    -- for the bar. [0] = local to this buffer in this window only.
+    vim.wo[win][0].winbar = "%#Comment# " .. leave_key .. " back to sidebar  ·  i type  ·  q close (normal mode)"
 
     -- jobstart(term=true) runs in the current buffer. TMUX is unset so
     -- tmux allows a client inside a tmux-hosted Neovim.
@@ -179,6 +212,15 @@ function M.open(session_id)
     current = { buf = buf, job = job, view = view }
 
     vim.keymap.set("n", "q", stop_current, { buffer = buf, nowait = true, desc = "atlas: close session view" })
+    vim.keymap.set({ "t", "n" }, leave_key, function()
+      back_to_sidebar(session_id)
+    end, { buffer = buf, nowait = true, desc = "atlas: back to the sidebar" })
+    vim.api.nvim_create_autocmd("TermEnter", {
+      buffer = buf,
+      callback = function()
+        refresh_client(view)
+      end,
+    })
     vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, {
       buffer = buf,
       once = true,

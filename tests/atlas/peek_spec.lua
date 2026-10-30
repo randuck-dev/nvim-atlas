@@ -91,6 +91,35 @@ describe("atlas.peek (real tmux client on a grouped view session)", function()
     end, 50), "expected the pane's existing content in the view")
   end)
 
+  it("<C-q> leaves the view for the sidebar's session row, keeping the view alive", function()
+    local main_win = open_sidebar_and_main_window()
+    local name, pane = new_session()
+    table.insert(to_kill, name)
+    mock_sessions({ { session_id = "s1", tmux_pane = pane, state = "done" } })
+
+    local sidebar = require("atlas.sidebar")
+    local real_focus = sidebar.focus_session
+    local focused
+    sidebar.focus_session = function(id)
+      focused = id
+    end
+
+    peek.open("s1")
+    local buf = vim.api.nvim_win_get_buf(main_win)
+    assert.is_truthy(vim.wo[main_win].winbar:find("<C-q> back to sidebar", 1, true))
+    assert.are.equal(buf, vim.api.nvim_get_current_buf())
+    local map = vim.fn.maparg("<C-q>", "t", false, true)
+    assert.are.equal(1, map.buffer, "mapped for the view buffer only")
+    map.callback()
+    vim.wait(200, function()
+      return focused ~= nil
+    end)
+    sidebar.focus_session = real_focus
+
+    assert.are.equal("s1", focused)
+    assert.is_truthy(peek._current_view(), "the view should stay open")
+  end)
+
   it("shows new output live", function()
     local main_win = open_sidebar_and_main_window()
     local name, pane = new_session()
