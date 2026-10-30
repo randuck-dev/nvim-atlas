@@ -110,3 +110,7 @@ Runs the plenary.nvim suite under `tests/atlas/` (clones plenary into
 `.deps/` on first run). Tests exercise the real external processes
 (`git`, `gh`, `claude-status`, terminal buffers) rather than mocking them
 — see individual test files for the fixtures used.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
