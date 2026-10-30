@@ -267,3 +267,173 @@ describe("atlas.unified review (real git)", function()
     assert.are.equal(tabs - 1, #vim.api.nvim_list_tabpages())
   end)
 end)
+
+describe("atlas.unified syntax highlighting (real git, bundled Lua parser)", function()
+  local root, wt
+
+  local function git(dir, args)
+    local r = vim.system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
+    assert(r.code == 0, "git " .. table.concat(args, " ") .. ": " .. (r.stderr or ""))
+  end
+
+  local function marks_on(buf, text)
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+      if l == text then
+        return vim.api.nvim_buf_get_extmarks(buf, unified._syntax_ns, { i - 1, 0 }, { i - 1, -1 }, { details = true })
+      end
+    end
+    error("no line " .. text)
+  end
+
+  local function groups(marks)
+    local g = {}
+    for _, m in ipairs(marks) do
+      g[#g + 1] = m[4].hl_group .. "@" .. m[3]
+    end
+    return table.concat(g, " ")
+  end
+
+  before_each(function()
+    root = vim.fn.resolve(vim.fn.tempname())
+    vim.fn.mkdir(root .. "/main", "p")
+    git(root .. "/main", { "init", "-q", "-b", "main" })
+    git(root .. "/main", { "config", "user.email", "t@example.com" })
+    git(root .. "/main", { "config", "user.name", "t" })
+    vim.fn.writefile({ "local a = 1", "return a" }, root .. "/main/m.lua")
+    vim.fn.writefile({ "plain" }, root .. "/main/notes.txt")
+    git(root .. "/main", { "add", "." })
+    git(root .. "/main", { "commit", "-q", "-m", "init" })
+    wt = root .. "/wt"
+    git(root .. "/main", { "worktree", "add", "-q", wt, "-b", "feature" })
+    vim.fn.writefile({ "local a = 2", "return a" }, wt .. "/m.lua")
+    vim.fn.writefile({ "changed" }, wt .. "/notes.txt")
+  end)
+
+  after_each(function()
+    vim.cmd("tabfirst")
+    vim.cmd("silent! tabonly")
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("highlights added and removed lines like a normal buffer would", function()
+    local before = vim.api.nvim_get_current_buf()
+    unified.open(wt, "syntax-test")
+    assert.is_true(vim.wait(5000, function()
+      local b = vim.api.nvim_get_current_buf()
+      return b ~= before and unified.is_unified(b) and vim.api.nvim_buf_line_count(b) > 1
+    end, 20))
+    local buf = vim.api.nvim_get_current_buf()
+
+    -- "local" is a keyword, the number a number -- after the +/- marker.
+    local added = groups(marks_on(buf, "+local a = 2"))
+    assert.truthy(added:find("@keyword[%w.]*@1"), "keyword at col 1, got: " .. added)
+    assert.truthy(added:find("@number[%w.]*@11"), "number at col 11, got: " .. added)
+    -- The removed line comes from the base version of the file.
+    local removed = groups(marks_on(buf, "-local a = 1"))
+    assert.truthy(removed:find("@keyword[%w.]*@1"), "got: " .. removed)
+    -- Unchanged context lines too.
+    assert.truthy(groups(marks_on(buf, " return a")):find("@keyword"))
+    -- No parser for .txt: stays plain, no errors.
+    assert.are.equal(0, #marks_on(buf, "+changed"))
+  end)
+end)
+
+describe("atlas.unified file panel as a folder tree (real git)", function()
+  local root, wt, buf
+
+  local function git(dir, args)
+    local r = vim.system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
+    assert(r.code == 0, "git " .. table.concat(args, " ") .. ": " .. (r.stderr or ""))
+  end
+
+  local function panel()
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local b = vim.api.nvim_win_get_buf(w)
+      if vim.bo[b].filetype == "AtlasReviewFiles" then
+        return w, b
+      end
+    end
+  end
+
+  local function press(win, line, keys)
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { line, 0 })
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "x", false)
+  end
+
+  before_each(function()
+    root = vim.fn.resolve(vim.fn.tempname())
+    for _, d in ipairs({ "main/lua/atlas", "main/tests" }) do
+      vim.fn.mkdir(root .. "/" .. d, "p")
+    end
+    git(root .. "/main", { "init", "-q", "-b", "main" })
+    git(root .. "/main", { "config", "user.email", "t@example.com" })
+    git(root .. "/main", { "config", "user.name", "t" })
+    vim.fn.writefile({ "a" }, root .. "/main/lua/atlas/x.lua")
+    vim.fn.writefile({ "readme" }, root .. "/main/README.md")
+    git(root .. "/main", { "add", "." })
+    git(root .. "/main", { "commit", "-q", "-m", "init" })
+    wt = root .. "/wt"
+    git(root .. "/main", { "worktree", "add", "-q", wt, "-b", "feature" })
+    vim.fn.writefile({ "b" }, wt .. "/lua/atlas/x.lua")
+    vim.fn.writefile({ "new" }, wt .. "/lua/atlas/y.lua")
+    vim.fn.mkdir(wt .. "/tests", "p")
+    vim.fn.writefile({ "t" }, wt .. "/tests/z_spec.lua")
+    vim.fn.writefile({ "README" }, wt .. "/README.md")
+
+    local before = vim.api.nvim_get_current_buf()
+    unified.open(wt, "tree-test")
+    assert.is_true(vim.wait(5000, function()
+      local b = vim.api.nvim_get_current_buf()
+      return b ~= before and unified.is_unified(b) and vim.api.nvim_buf_line_count(b) > 1
+    end, 20))
+    buf = vim.api.nvim_get_current_buf()
+  end)
+
+  after_each(function()
+    vim.cmd("tabfirst")
+    vim.cmd("silent! tabonly")
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("lists folders first, merges single-folder chains, then files", function()
+    local _, pbuf = panel()
+    assert.are.same({
+      " ▾ lua/atlas/",
+      "   M  x.lua  +1 -1",
+      "   A  y.lua  +1 -0",
+      " ▾ tests/",
+      "   A  z_spec.lua  +1 -0",
+      " M  README.md  +1 -1",
+    }, vim.api.nvim_buf_get_lines(pbuf, 0, -1, false))
+  end)
+
+  it("← folds a folder, → opens it; ← inside a folder folds it and goes to it", function()
+    local pwin, pbuf = panel()
+    local function lines()
+      return vim.api.nvim_buf_get_lines(pbuf, 0, -1, false)
+    end
+
+    press(pwin, 1, "<Left>")
+    assert.are.equal(" ▸ lua/atlas/", lines()[1])
+    assert.are.equal(" ▾ tests/", lines()[2], "its files are hidden")
+
+    press(pwin, 1, "<Right>")
+    assert.are.equal("   M  x.lua  +1 -1", lines()[2])
+
+    press(pwin, 5, "h") -- on z_spec.lua, inside tests/
+    assert.are.equal(" ▸ tests/", lines()[4])
+    assert.are.equal(4, vim.api.nvim_win_get_cursor(pwin)[1])
+  end)
+
+  it("⏎ on a file jumps to it, and the panel marks it as current", function()
+    local pwin, pbuf = panel()
+    press(pwin, 5, "<CR>")
+    assert.are.equal(buf, vim.api.nvim_get_current_buf())
+    assert.are.equal("▍ tests/z_spec.lua  (new)", vim.api.nvim_get_current_line())
+
+    local current_ns = vim.api.nvim_create_namespace("atlas_unified_panel_current")
+    local marks = vim.api.nvim_buf_get_extmarks(pbuf, current_ns, 0, -1, {})
+    assert.are.equal(4, marks[1][2]) -- panel line 5
+  end)
+end)

@@ -25,6 +25,7 @@ local function hl()
   vim.api.nvim_set_hl(0, "AtlasDiffGutter", { link = "LineNr", default = true })
   vim.api.nvim_set_hl(0, "AtlasKey", { fg = "#f6c177", bold = true, default = true })
   vim.api.nvim_set_hl(0, "AtlasHint", { fg = "#6e6a86", default = true })
+  vim.api.nvim_set_hl(0, "AtlasDiffDir", { link = "Directory", default = true })
   vim.api.nvim_set_hl(0, "AtlasStatusM", { fg = "#f6c177", bold = true, default = true }) -- gold
   vim.api.nvim_set_hl(0, "AtlasStatusA", { fg = "#9ccfd8", default = true }) -- foam
   vim.api.nvim_set_hl(0, "AtlasStatusD", { fg = "#eb6f92", default = true }) -- love
@@ -209,6 +210,23 @@ function M.files(rows)
   return list
 end
 
+-- Changed files as a folder tree (like diffview's tree listing): folders
+-- first, then files, alphabetically; a folder holding only one folder is
+-- merged into one line ("lua/atlas/"). view.folded[path] folds a folder.
+local function build_tree(files)
+  local root = { dirs = {}, files = {} }
+  for i, f in ipairs(files) do
+    local parts = vim.split(f.file, "/", { plain = true })
+    local node = root
+    for p = 1, #parts - 1 do
+      node.dirs[parts[p]] = node.dirs[parts[p]] or { dirs = {}, files = {} }
+      node = node.dirs[parts[p]]
+    end
+    table.insert(node.files, { name = parts[#parts], index = i })
+  end
+  return root
+end
+
 local function render_panel(buf)
   local view = views[buf]
   local pbuf = view.panel_buf
@@ -216,16 +234,49 @@ local function render_panel(buf)
     return
   end
   view.files = M.files(view.rows)
+  view.folded = view.folded or {}
+  -- panel line -> { kind = "dir", path, parent } | { kind = "file", index, parent }
+  view.panel_rows, view.file_line, view.dir_line = {}, {}, {}
   local lines, hls = {}, {}
-  for _, f in ipairs(view.files) do
-    local head = " " .. f.status .. "  " .. f.file
-    local adds, dels = "+" .. f.adds, "-" .. f.dels
-    lines[#lines + 1] = head .. "  " .. adds .. " " .. dels
-    local l = #lines - 1
-    hls[#hls + 1] = { l, 1, 2, STATUS_HL[f.status] }
-    hls[#hls + 1] = { l, #head + 2, #head + 2 + #adds, "AtlasStatusA" }
-    hls[#hls + 1] = { l, #head + 3 + #adds, #lines[#lines], "AtlasStatusD" }
+
+  local function walk(node, depth, prefix, parent)
+    local indent = " " .. string.rep("  ", depth)
+    local names = vim.tbl_keys(node.dirs)
+    table.sort(names)
+    for _, name in ipairs(names) do
+      local child, label, path = node.dirs[name], name, prefix .. name
+      while #child.files == 0 and vim.tbl_count(child.dirs) == 1 do
+        local only = next(child.dirs)
+        label, path, child = label .. "/" .. only, path .. "/" .. only, child.dirs[only]
+      end
+      local folded = view.folded[path]
+      local line = indent .. (folded and "▸ " or "▾ ") .. label .. "/"
+      lines[#lines + 1] = line
+      view.panel_rows[#lines] = { kind = "dir", path = path, parent = parent }
+      view.dir_line[path] = #lines
+      hls[#hls + 1] = { #lines - 1, #indent, #line, "AtlasDiffDir" }
+      if not folded then
+        walk(child, depth + 1, path .. "/", path)
+      end
+    end
+    table.sort(node.files, function(a, b)
+      return a.name < b.name
+    end)
+    for _, entry in ipairs(node.files) do
+      local f = view.files[entry.index]
+      local head = indent .. f.status .. "  " .. entry.name
+      local adds, dels = "+" .. f.adds, "-" .. f.dels
+      lines[#lines + 1] = head .. "  " .. adds .. " " .. dels
+      view.panel_rows[#lines] = { kind = "file", index = entry.index, parent = parent }
+      view.file_line[entry.index] = #lines
+      local l = #lines - 1
+      hls[#hls + 1] = { l, #indent, #indent + 1, STATUS_HL[f.status] }
+      hls[#hls + 1] = { l, #head + 2, #head + 2 + #adds, "AtlasStatusA" }
+      hls[#hls + 1] = { l, #head + 3 + #adds, #lines[#lines], "AtlasStatusD" }
+    end
   end
+  walk(build_tree(view.files), 0, "", nil)
+
   if #lines == 0 then
     lines = { " (no changed files)" }
   end
@@ -264,8 +315,9 @@ local function mark_current(buf)
   end
   vim.api.nvim_buf_clear_namespace(pbuf, current_ns, 0, -1)
   local idx = current_file_index(buf)
-  if idx then
-    vim.api.nvim_buf_set_extmark(pbuf, current_ns, idx - 1, 0, { line_hl_group = "CursorLine" })
+  local line = idx and view.file_line and view.file_line[idx]
+  if line then
+    vim.api.nvim_buf_set_extmark(pbuf, current_ns, line - 1, 0, { line_hl_group = "CursorLine" })
   end
 end
 
@@ -277,6 +329,132 @@ end
 
 
 --- Fills `buf` with the current diff of its view. Returns ok, err.
+-- Syntax highlighting, like diffview: each row is highlighted from its
+-- *whole* file, not from the diff fragment (fragments parse badly).
+-- ctx/add rows from the current file, del rows from the base version.
+-- Uses the same treesitter parsers and @capture groups as normal
+-- buffers; file types without a parser stay plain.
+local syntax_ns = vim.api.nvim_create_namespace("atlas_unified_syntax")
+
+--- Per-line highlight spans for `text` in `lang`:
+--- spans[line0] = { { start_col, end_col, hl_group }, ... }, or nil if
+--- there's no parser/highlights query for it.
+function M.highlight_spans(text, lang)
+  local ok, parser = pcall(vim.treesitter.get_string_parser, text, lang)
+  if not ok or not parser then
+    return nil
+  end
+  local query = vim.treesitter.query.get(lang, "highlights")
+  if not query then
+    return nil
+  end
+  local tree = parser:parse()[1]
+  if not tree then
+    return nil
+  end
+  local lines = vim.split(text, "\n", { plain = true })
+  local spans = {}
+  for id, node in query:iter_captures(tree:root(), text, 0, -1) do
+    local name = query.captures[id]
+    if name and not name:match("^_") and name ~= "spell" and name ~= "nospell" then
+      local group = "@" .. name .. "." .. lang
+      local sr, sc, er, ec = node:range()
+      for l = sr, er do
+        local from = (l == sr) and sc or 0
+        local to = (l == er) and ec or #(lines[l + 1] or "")
+        if to > from then
+          spans[l] = spans[l] or {}
+          table.insert(spans[l], { from, to, group })
+        end
+      end
+    end
+  end
+  return spans
+end
+
+local function lang_for(file)
+  local ft = vim.filetype.match({ filename = file })
+  return ft and vim.treesitter.language.get_lang(ft) or nil
+end
+
+local function read_file(path)
+  local fd = io.open(path, "rb")
+  if not fd then
+    return nil
+  end
+  local text = fd:read("*a")
+  fd:close()
+  return text
+end
+
+local function syntax(buf)
+  local view = views[buf]
+  vim.api.nvim_buf_clear_namespace(buf, syntax_ns, 0, -1)
+  local last = 0
+  for l in pairs(view.rows) do
+    last = math.max(last, l)
+  end
+
+  -- Which file versions are needed, per file.
+  local wanted = {}
+  for l = 1, last do
+    local row = view.rows[l]
+    if row and row.kind == "file" then
+      local old_path = row.flag and row.flag:match("^renamed from (.*)$") or row.file
+      wanted[row.file] = { lang = lang_for(row.file), old_path = old_path }
+    end
+  end
+
+  local cache = {}
+  local function spans_for(file, version)
+    local w = wanted[file]
+    if not w or not w.lang then
+      return nil
+    end
+    local key = file .. "\0" .. version
+    if cache[key] == nil then
+      local text
+      if version == "new" then
+        text = read_file(view.path .. "/" .. file)
+      else
+        local r = vim.system({ "git", "-C", view.path, "show", view.base .. ":" .. w.old_path }, { text = true }):wait()
+        text = r.code == 0 and r.stdout or nil
+      end
+      cache[key] = text and M.highlight_spans(text, w.lang) or false
+    end
+    return cache[key] or nil
+  end
+
+  for l = 1, last do
+    local row = view.rows[l]
+    if row and (row.kind == "ctx" or row.kind == "add" or row.kind == "del") then
+      local spans, line
+      if row.kind == "del" then
+        spans, line = spans_for(row.file, "old"), row.old
+      else
+        spans, line = spans_for(row.file, "new"), row.new
+      end
+      local list = spans and line and spans[line - 1]
+      if list then
+        local width = #(vim.api.nvim_buf_get_lines(buf, l - 1, l, false)[1] or "")
+        for _, sp in ipairs(list) do
+          -- +1: the buffer line starts with the +/-/space marker.
+          local from, to = sp[1] + 1, math.min(sp[2] + 1, width)
+          if to > from then
+            vim.api.nvim_buf_set_extmark(buf, syntax_ns, l - 1, from, {
+              end_col = to,
+              hl_group = sp[3],
+              priority = 100,
+            })
+          end
+        end
+      end
+    end
+  end
+end
+M._syntax_ns = syntax_ns
+
+
 local function load(buf)
   local view = views[buf]
   local text = M.diff_text(view.path, view.base)
@@ -290,6 +468,7 @@ local function load(buf)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
   paint(buf)
+  syntax(buf)
   render_panel(buf)
   mark_current(buf)
 end
@@ -460,12 +639,47 @@ function M.open(path, session_id)
     vim.wo[0].relativenumber = false
     vim.wo[0].signcolumn = "no"
     vim.wo[0].wrap = false
-    vim.wo[0].winbar = "%#AtlasKey#⏎%#AtlasHint# jump to file  %#AtlasKey#q%#AtlasHint# close"
+    vim.wo[0].winbar = "%#AtlasKey#⏎%#AtlasHint# open  %#AtlasKey#←→%#AtlasHint# fold  %#AtlasKey#q%#AtlasHint# close"
     views[buf].panel_buf = pbuf
 
-    vim.keymap.set("n", "<CR>", function()
+    local function panel_row()
       local view = views[buf]
-      local f = view and view.files and view.files[vim.api.nvim_win_get_cursor(0)[1]]
+      local line = vim.api.nvim_win_get_cursor(0)[1]
+      return view, view and view.panel_rows and view.panel_rows[line]
+    end
+    -- Fold/unfold a folder, keeping the cursor on it.
+    local function set_folded(path, folded)
+      local view = views[buf]
+      view.folded[path] = folded or nil
+      render_panel(buf)
+      mark_current(buf)
+      local line = view.dir_line[path]
+      if line then
+        vim.api.nvim_win_set_cursor(0, { line, 0 })
+      end
+    end
+    local function collapse()
+      local _, row = panel_row()
+      if row and row.kind == "dir" and not views[buf].folded[row.path] then
+        set_folded(row.path, true)
+      elseif row and row.parent then
+        set_folded(row.parent, true) -- inside a folder: fold it, go to it
+      end
+    end
+    local function expand()
+      local _, row = panel_row()
+      if row and row.kind == "dir" and views[buf].folded[row.path] then
+        set_folded(row.path, false)
+      end
+    end
+
+    vim.keymap.set("n", "<CR>", function()
+      local view, row = panel_row()
+      if row and row.kind == "dir" then
+        set_folded(row.path, not view.folded[row.path])
+        return
+      end
+      local f = row and row.kind == "file" and view.files[row.index]
       local win = vim.fn.bufwinid(buf)
       if f and win ~= -1 then
         vim.api.nvim_set_current_win(win)
@@ -473,7 +687,13 @@ function M.open(path, session_id)
         vim.cmd("normal! zt")
         mark_current(buf)
       end
-    end, { buffer = pbuf, nowait = true, desc = "atlas: jump to file" })
+    end, { buffer = pbuf, nowait = true, desc = "atlas: jump to file / fold folder" })
+    for _, lhs in ipairs({ "<Left>", "h" }) do
+      vim.keymap.set("n", lhs, collapse, { buffer = pbuf, nowait = true, desc = "atlas: fold folder" })
+    end
+    for _, lhs in ipairs({ "<Right>", "l" }) do
+      vim.keymap.set("n", lhs, expand, { buffer = pbuf, nowait = true, desc = "atlas: open folder" })
+    end
     vim.keymap.set("n", "q", function()
       if #vim.api.nvim_list_tabpages() > 1 then
         vim.cmd("tabclose")
