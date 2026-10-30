@@ -23,7 +23,8 @@ In the sidebar, the top bar shows the keys for the row under the cursor;
 | Key    | On a session row                         | On a worktree row                    |
 |--------|------------------------------------------|--------------------------------------|
 | `n`    | new worktree + Claude session in its repo (also on a repo row) |              |
-| `<CR>` | open the session's tmux pane (live, interactive) | review its diff (diffview)   |
+| `<CR>` | open the session's tmux pane (live, interactive) | review its diff (unified)    |
+| `v`    |                                          | review side by side (diffview) |
 | `s`    | send all pending notes into the session  |                                      |
 | `X`    | clean up its finished worktrees, including its own (closes the session) |    |
 | `y`    |                                          | copy its pending notes               |
@@ -41,8 +42,16 @@ repo). Sections show first, in the order you made them, each session
 with its repo name; everything else stays grouped by repo. Saved in
 Neovim's state folder, so they survive restarts.
 
-While reviewing a diff, `<leader>aa` adds a note on the current line, or
-on the selected lines in visual mode. Notes show inline in the diff.
+The unified review shows everything the worktree changed since its merge
+base (committed, uncommitted and untracked) in one buffer, GitHub style,
+with old/new line numbers, and a panel of changed files on the left
+(status, +/- counts; `⏎` jumps to a file; the file you're reading is
+highlighted). In the diff: `]c`/`[c` next/previous hunk, `]f`/`[f` next/
+previous file, `⏎` opens the file at that line in a split, `r` reloads,
+`q` closes.
+
+While reviewing (unified or side by side), `<leader>aa` adds a note on the
+current line, or on the selected lines in visual mode. Notes show inline.
 
 In the session view: `i` to type into the session, `<C-\><C-n>` back to
 normal mode, `q` to close it. It's a real tmux client on a temporary

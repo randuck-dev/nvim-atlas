@@ -141,16 +141,28 @@ function M.add(line1, line2)
     return
   end
 
-  local file = current_file()
-  if not file then
-    vim.notify("atlas: couldn't resolve the current file in diffview", vim.log.levels.WARN)
-    return
-  end
-
   line1 = line1 or vim.api.nvim_win_get_cursor(0)[1]
   line2 = line2 or line1
   if line1 > line2 then
     line1, line2 = line2, line1
+  end
+
+  -- In the unified review, buffer lines aren't file lines: atlas's own
+  -- row map turns them into a file and its (new) line numbers.
+  local unified = require("atlas.unified")
+  local file
+  if unified.is_unified(0) then
+    file, line1, line2 = unified.resolve(0, line1, line2)
+    if not file then
+      vim.notify("atlas: put the cursor on a line of a file's diff", vim.log.levels.WARN)
+      return
+    end
+  else
+    file = current_file()
+    if not file then
+      vim.notify("atlas: couldn't resolve the current file in diffview", vim.log.levels.WARN)
+      return
+    end
   end
 
   local where = line1 == line2 and (file .. ":" .. line1) or string.format("%s:%d-%d", file, line1, line2)
@@ -159,7 +171,11 @@ function M.add(line1, line2)
       return
     end
     M.record(ctx.session_id, { worktree = ctx.path, file = file, line_start = line1, line_end = line2, text = text })
-    M.render_inline(0, ctx.session_id, ctx.path, file)
+    if unified.is_unified(0) then
+      unified.render_notes(0)
+    else
+      M.render_inline(0, ctx.session_id, ctx.path, file)
+    end
     vim.notify("atlas: note added", vim.log.levels.INFO)
   end)
 end

@@ -129,11 +129,18 @@ local function ensure_buf()
     if row and (row.kind == "section" or row.kind == "repo") then
       fold(true)
     elseif row and row.kind == "worktree" then
-      review.open(row.path, row.session_id)
+      require("atlas.unified").open(row.path, row.session_id)
     elseif row and row.kind == "session" then
       peek.open(row.session_id)
     end
   end, "atlas: review worktree / peek session under cursor")
+
+  map("v", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if row and row.kind == "worktree" then
+      review.open(row.path, row.session_id)
+    end
+  end, "atlas: review worktree side by side (diffview)")
 
   map("y", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
@@ -321,7 +328,7 @@ local HINTS = {
   repo = { { "←→", "fold" }, { "n", "new worktree" } },
   section = { { "←→", "fold" }, { "R", "rename" }, { "d", "delete" } },
   session = { { "⏎", "open" }, { "s", "send" }, { "m", "move" }, { "X", "clean" } },
-  worktree = { { "⏎", "diff" }, { "y", "copy notes" } },
+  worktree = { { "⏎", "review" }, { "v", "split" }, { "y", "copy notes" } },
   -- A session whose folder was removed: closing it is the useful action.
   session_gone = { { "⏎", "open" }, { "X", "close session" } },
 }
@@ -329,7 +336,8 @@ local HINTS = {
 local HELP = {
   { "←→", "collapse/expand (h l, ⏎ opens)" },
   { "⏎", "session: open live view" },
-  { "", "worktree: review diff" },
+  { "", "worktree: review (unified)" },
+  { "v", "worktree: side-by-side review" },
   { "n", "new worktree + session" },
   { "m", "move session to a section" },
   { "S", "new section" },
