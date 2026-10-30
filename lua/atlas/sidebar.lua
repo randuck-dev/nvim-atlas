@@ -90,9 +90,45 @@ local function ensure_buf()
     vim.keymap.set("n", lhs, fn, { buffer = buf, desc = desc, nowait = true })
   end
 
+  -- Folding sections and repo groups, tree-style.
+  local function fold(open)
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if not row or not row.group then
+      return
+    end
+    local is_header = row.kind == "section" or row.kind == "repo"
+    if open then
+      if is_header and row.collapsed then
+        sections.set_collapsed(row.group, false)
+        M.redraw()
+      end
+      return
+    end
+    -- On a header: collapse it. Inside a group: collapse the group and
+    -- jump to its header (nothing above it moves, so its line holds).
+    if not row.collapsed or not is_header then
+      sections.set_collapsed(row.group, true)
+      M.redraw()
+    end
+    vim.api.nvim_win_set_cursor(0, { row.header, 0 })
+    M.update_legend()
+  end
+  for _, lhs in ipairs({ "<Left>", "h" }) do
+    map(lhs, function()
+      fold(false)
+    end, "atlas: collapse group")
+  end
+  for _, lhs in ipairs({ "<Right>", "l" }) do
+    map(lhs, function()
+      fold(true)
+    end, "atlas: expand group")
+  end
+
   map("<CR>", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
-    if row and row.kind == "worktree" then
+    if row and (row.kind == "section" or row.kind == "repo") then
+      fold(true)
+    elseif row and row.kind == "worktree" then
       review.open(row.path, row.session_id)
     elseif row and row.kind == "session" then
       peek.open(row.session_id)
@@ -282,8 +318,8 @@ end
 -- wouldn't show) lists the keys for the row under the cursor; `?` adds
 -- the full list at the bottom.
 local HINTS = {
-  repo = { { "n", "new worktree" }, { "S", "new section" } },
-  section = { { "R", "rename" }, { "d", "delete" }, { "S", "new" } },
+  repo = { { "←→", "fold" }, { "n", "new worktree" } },
+  section = { { "←→", "fold" }, { "R", "rename" }, { "d", "delete" } },
   session = { { "⏎", "open" }, { "s", "send" }, { "m", "move" }, { "X", "clean" } },
   worktree = { { "⏎", "diff" }, { "y", "copy notes" } },
   -- A session whose folder was removed: closing it is the useful action.
@@ -291,6 +327,7 @@ local HINTS = {
 }
 
 local HELP = {
+  { "←→", "collapse/expand (h l, ⏎ opens)" },
   { "⏎", "session: open live view" },
   { "", "worktree: review diff" },
   { "n", "new worktree + session" },
@@ -402,7 +439,7 @@ local function render(sessions, touched, pr_by_path, changed, repos)
 
   -- One session and its changed worktrees. Under a section, the repo
   -- name is shown after the title, since the header no longer says it.
-  local function add_session(session, show_repo)
+  local function add_session(session, show_repo, group, header)
     local _, repo_name, root = repo_group(repos, session.cwd or "")
     local indent = "  "
     local glyph = STATE_GLYPH[session.state] or "  "
@@ -451,6 +488,8 @@ local function render(sessions, touched, pr_by_path, changed, repos)
       cwd = session.cwd,
       gone = session.cwd ~= nil and session.cwd ~= "" and vim.fn.isdirectory(session.cwd) == 0,
       pane = session.tmux_pane,
+      group = group,
+      header = header,
     }
 
     local glyph_hl = STATE_HL[session.state]
@@ -480,22 +519,61 @@ local function render(sessions, touched, pr_by_path, changed, repos)
         highlights[#highlights + 1] = { #lines, note_start, #wline, "AtlasNoteBadge" }
       end
       lines[#lines + 1] = wline
-      rows[#lines] = { kind = "worktree", session_id = session.session_id, path = path, root = root }
+      rows[#lines] = {
+        kind = "worktree",
+        session_id = session.session_id,
+        path = path,
+        root = root,
+        group = group,
+        header = header,
+      }
     end
+  end
+
+  -- A section or repo header. Collapsed, it shows how many sessions are
+  -- folded away, and a ● if any of them is waiting on you -- folding
+  -- should never hide that. Returns whether it's collapsed and its line.
+  local function add_header(row, key, name, hl, list)
+    local collapsed = sec.collapsed[key] == true
+    local line = (collapsed and "▸ " or "▾ ") .. name
+    local name_end = #line
+    local count_start, dot_start
+    if collapsed then
+      count_start = #line
+      line = line .. string.format("  (%d)", #list)
+      for _, session in ipairs(list) do
+        if session.state == "input" then
+          dot_start = #line + 2
+          line = line .. "  ●"
+          break
+        end
+      end
+    end
+    lines[#lines + 1] = line
+    row.group, row.collapsed, row.header = key, collapsed, #lines
+    rows[#lines] = row
+    highlights[#highlights + 1] = { #lines - 1, 0, name_end, hl }
+    if count_start then
+      highlights[#highlights + 1] = { #lines - 1, count_start, dot_start and dot_start - 2 or #line, "AtlasHint" }
+    end
+    if dot_start then
+      highlights[#highlights + 1] = { #lines - 1, dot_start, #line, "AtlasStateInput" }
+    end
+    return collapsed, #lines
   end
 
   -- The user's sections first, in their order, even when empty.
   for _, name in ipairs(sec.sections) do
-    local sline = "▾ " .. name
-    lines[#lines + 1] = sline
-    rows[#lines] = { kind = "section", name = name }
-    highlights[#highlights + 1] = { #lines - 1, 0, #sline, "AtlasSection" }
-    if #in_section[name] == 0 then
-      lines[#lines + 1] = "  (empty: m on a session moves it here)"
-      highlights[#highlights + 1] = { #lines - 1, 0, #lines[#lines], "AtlasHint" }
-    end
-    for _, session in ipairs(in_section[name]) do
-      add_session(session, true)
+    local key = "section:" .. name
+    local collapsed, header = add_header({ kind = "section", name = name }, key, name, "AtlasSection", in_section[name])
+    if not collapsed then
+      if #in_section[name] == 0 then
+        lines[#lines + 1] = "  (empty: m on a session moves it here)"
+        highlights[#highlights + 1] = { #lines - 1, 0, #lines[#lines], "AtlasHint" }
+      end
+      for _, session in ipairs(in_section[name]) do
+        add_session(session, true, key, header)
+      end
     end
   end
 
@@ -506,12 +584,12 @@ local function render(sessions, touched, pr_by_path, changed, repos)
   -- Then everything not in a section, grouped by repo.
   for _, key in ipairs(order) do
     local g = groups[key]
-    local rline = "▾ " .. g.name
-    lines[#lines + 1] = rline
-    rows[#lines] = { kind = "repo", root = g.root, name = g.name }
-    highlights[#highlights + 1] = { #lines - 1, 0, #rline, "AtlasRepo" }
-    for _, session in ipairs(g.sessions) do
-      add_session(session, false)
+    local gkey = "repo:" .. key
+    local collapsed, header = add_header({ kind = "repo", root = g.root, name = g.name }, gkey, g.name, "AtlasRepo", g.sessions)
+    if not collapsed then
+      for _, session in ipairs(g.sessions) do
+        add_session(session, false, gkey, header)
+      end
     end
   end
 

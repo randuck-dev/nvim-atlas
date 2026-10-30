@@ -19,25 +19,33 @@ end
 function M.load()
   local p = path()
   if vim.fn.filereadable(p) == 0 then
-    return { sections = {}, assign = {} }
+    return { sections = {}, assign = {}, collapsed = {} }
   end
   local ok, data = pcall(vim.json.decode, table.concat(vim.fn.readfile(p), "\n"))
   if not ok or type(data) ~= "table" then
-    return { sections = {}, assign = {} }
+    return { sections = {}, assign = {}, collapsed = {} }
   end
   data.sections = type(data.sections) == "table" and data.sections or {}
   data.assign = type(data.assign) == "table" and data.assign or {}
+  data.collapsed = type(data.collapsed) == "table" and data.collapsed or {}
   -- An empty JSON object decodes as an empty list; both mean "none".
   if vim.islist(data.assign) then
     data.assign = {}
+  end
+  if vim.islist(data.collapsed) then
+    data.collapsed = {}
   end
   return data
 end
 
 local function save(data)
   vim.fn.mkdir(vim.fn.fnamemodify(path(), ":h"), "p")
-  local assign = next(data.assign) and data.assign or vim.empty_dict()
-  vim.fn.writefile({ vim.json.encode({ sections = data.sections, assign = assign }) }, path())
+  local function obj(t)
+    return next(t) and t or vim.empty_dict()
+  end
+  vim.fn.writefile({
+    vim.json.encode({ sections = data.sections, assign = obj(data.assign), collapsed = obj(data.collapsed or {}) }),
+  }, path())
 end
 
 local function index_of(list, name)
@@ -92,6 +100,10 @@ function M.rename(old, new)
     return false, "a section named " .. new .. " already exists"
   end
   data.sections[i] = new
+  if data.collapsed["section:" .. old] then
+    data.collapsed["section:" .. old] = nil
+    data.collapsed["section:" .. new] = true
+  end
   for sid, name in pairs(data.assign) do
     if name == old then
       data.assign[sid] = new
@@ -108,6 +120,7 @@ function M.remove(name)
   if i then
     table.remove(data.sections, i)
   end
+  data.collapsed["section:" .. name] = nil
   for sid, n in pairs(data.assign) do
     if n == name then
       data.assign[sid] = nil
@@ -128,6 +141,18 @@ function M.assign(session_id, name)
   else
     data.assign[session_id] = nil
   end
+  save(data)
+end
+
+--- Whether the group with this key ("section:<name>" or
+--- "repo:<root>") is collapsed in the sidebar.
+function M.is_collapsed(key)
+  return M.load().collapsed[key] == true
+end
+
+function M.set_collapsed(key, collapsed)
+  local data = M.load()
+  data.collapsed[key] = collapsed or nil
   save(data)
 end
 

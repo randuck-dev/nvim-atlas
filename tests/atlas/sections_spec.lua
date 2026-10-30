@@ -71,4 +71,22 @@ describe("atlas.sections", function()
     assert.are.same({ "to deploy" }, raw.sections)
     assert.are.equal("to deploy", raw.assign.s1)
   end)
+
+  it("remembers collapsed groups, and carries them through rename/delete", function()
+    sections.add("obs")
+    sections.set_collapsed("section:obs", true)
+    sections.set_collapsed("repo:/x/y", true)
+    assert.is_true(sections.is_collapsed("section:obs"))
+    assert.is_true(sections.is_collapsed("repo:/x/y"))
+
+    sections.rename("obs", "observability")
+    assert.is_false(sections.is_collapsed("section:obs"))
+    assert.is_true(sections.is_collapsed("section:observability"))
+
+    sections.remove("observability")
+    assert.is_false(sections.is_collapsed("section:observability"))
+
+    sections.set_collapsed("repo:/x/y", false)
+    assert.is_false(sections.is_collapsed("repo:/x/y"))
+  end)
 end)

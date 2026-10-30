@@ -31,6 +31,7 @@ In the sidebar, the top bar shows the keys for the row under the cursor;
 | `q`    | close the sidebar                        | same                                 |
 | `m`    | move it into a section (or a new one)    |                                      |
 | `S`    | new section                              | same                                 |
+| `←` `→` | on a section/repo header: collapse / expand (`⏎` also expands; `h`/`l` work too); inside a group, `←` collapses it | |
 | `?`    | show/hide all keys                       | same                                 |
 
 Sections are your own groupings ("to deploy", "observability", ...):

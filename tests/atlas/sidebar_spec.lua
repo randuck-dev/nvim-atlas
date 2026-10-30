@@ -465,6 +465,59 @@ describe("atlas.sidebar", function()
       assert.is_true(line_of("▾ alpha") < line_of("alpha work"))
     end)
 
+    local function press(win, line, keys)
+      vim.api.nvim_win_set_cursor(win, { line, 0 })
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "x", false)
+    end
+
+    it("← collapses a section, → and ⏎ open it again", function()
+      sections.assign("a", "to deploy")
+      local win = open_and_wait("alpha work")
+
+      press(win, line_of("▾ to deploy"), "<Left>")
+      assert.truthy(line_of("▸ to deploy  (1)"))
+      assert.is_nil(line_of("alpha work"), "a collapsed section hides its sessions")
+      assert.truthy(line_of("beta work"), "other groups are unaffected")
+      assert.is_true(sections.is_collapsed("section:to deploy"), "remembered across restarts")
+
+      press(win, line_of("▸ to deploy"), "<Right>")
+      assert.truthy(line_of("▾ to deploy"))
+      assert.truthy(line_of("alpha work"))
+
+      press(win, line_of("▾ to deploy"), "<Left>")
+      press(win, line_of("▸ to deploy"), "<CR>")
+      assert.truthy(line_of("alpha work"))
+    end)
+
+    it("← on a session inside a section collapses it and jumps to its header", function()
+      sections.assign("a", "to deploy")
+      local win = open_and_wait("alpha work")
+
+      press(win, line_of("alpha work"), "<Left>")
+      assert.truthy(line_of("▸ to deploy"))
+      assert.are.equal(line_of("▸ to deploy"), vim.api.nvim_win_get_cursor(win)[1])
+    end)
+
+    it("a collapsed group still shows that something is waiting on you", function()
+      state.sessions[1].state = "input"
+      sections.assign("a", "to deploy")
+      local win = open_and_wait("alpha work")
+
+      press(win, line_of("▾ to deploy"), "<Left>")
+      assert.truthy(line_of("▸ to deploy  (1)  ●"))
+    end)
+
+    it("repo groups fold too, and h/l work like ←/→", function()
+      local win = open_and_wait("beta work")
+
+      press(win, line_of("▾ beta"), "h")
+      assert.truthy(line_of("▸ beta  (1)"))
+      assert.is_nil(line_of("beta work"))
+
+      press(win, line_of("▸ beta"), "l")
+      assert.truthy(line_of("beta work"))
+    end)
+
     it("R renames a section", function()
       sections.assign("a", "obs")
       local win = open_and_wait("alpha work")
