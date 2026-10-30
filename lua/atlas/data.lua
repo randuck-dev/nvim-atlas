@@ -327,4 +327,115 @@ function M.pr_status(paths, cb)
   )
 end
 
+--- Parses `git worktree list --porcelain` into { {path, branch}, ... },
+--- main checkout first. branch is nil for a detached HEAD; bare
+--- entries are left out.
+function M._parse_worktrees(text)
+  local list, cur = {}, nil
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    local path = line:match("^worktree (.+)$")
+    if path then
+      cur = { path = path }
+      list[#list + 1] = cur
+    elseif cur and line == "bare" then
+      cur.bare = true
+    elseif cur then
+      local ref = line:match("^branch (.+)$")
+      if ref then
+        cur.branch = ref:gsub("^refs/heads/", "")
+      end
+    end
+  end
+  return vim.tbl_filter(function(w)
+    return not w.bare
+  end, list)
+end
+
+--- Every worktree of the repo whose main checkout is `root`.
+--- cb(list) as in _parse_worktrees; {} if it isn't a repo.
+function M.worktrees(root, cb)
+  run({ "git", "-C", root, "worktree", "list", "--porcelain" }, function(ok, out)
+    cb(ok and M._parse_worktrees(out) or {})
+  end)
+end
+
+-- A process name that is Claude Code itself: "claude", or Nix's
+-- ".claude-wrapped". Not helpers like claude-status.
+local function is_claude(comm)
+  local name = vim.fn.fnamemodify(comm, ":t")
+  return name == "claude" or name == ".claude-wrapped"
+end
+
+--- Which tmux panes run Claude, from `tmux list-panes -a` output
+--- ("pane_id|pane_pid|path" lines) and `ps -ax -o pid=,ppid=,comm=`
+--- output: Claude is the pane's process or runs under it (e.g. a
+--- shell that started it). One entry per pane, { pane, cwd }.
+function M._claude_panes_from(panes_text, ps_text)
+  local comm, children = {}, {}
+  for line in (ps_text .. "\n"):gmatch("(.-)\n") do
+    local pid, ppid, c = line:match("^%s*(%d+)%s+(%d+)%s+(.+)$")
+    if pid then
+      comm[pid] = c
+      children[ppid] = children[ppid] or {}
+      table.insert(children[ppid], pid)
+    end
+  end
+  local function runs_claude(pid, depth)
+    if comm[pid] and is_claude(comm[pid]) then
+      return true
+    end
+    if depth == 0 then
+      return false
+    end
+    for _, child in ipairs(children[pid] or {}) do
+      if runs_claude(child, depth - 1) then
+        return true
+      end
+    end
+    return false
+  end
+  local list, seen = {}, {}
+  for line in (panes_text .. "\n"):gmatch("(.-)\n") do
+    local pane, pid, cwd = line:match("^(%%%d+)|(%d+)|(.*)$")
+    -- Grouped sessions list the same pane more than once.
+    if pane and not seen[pane] then
+      seen[pane] = true
+      if runs_claude(pid, 3) then
+        list[#list + 1] = { pane = pane, cwd = cwd }
+      end
+    end
+  end
+  return list
+end
+
+--- tmux panes running Claude Code, whether or not claude-status knows
+--- about them. cb(list) as in _claude_panes_from; {} without tmux.
+function M.claude_panes(cb)
+  run({ "tmux", "list-panes", "-a", "-F", "#{pane_id}|#{pane_pid}|#{pane_current_path}" }, function(ok, panes)
+    if not ok then
+      cb({})
+      return
+    end
+    run({ "ps", "-ax", "-o", "pid=,ppid=,comm=" }, function(ok2, ps)
+      cb(ok2 and M._claude_panes_from(panes, ps) or {})
+    end)
+  end)
+end
+
+--- When Claude Code last wrote a conversation for `path` (epoch
+--- seconds), or nil if it never had one there. Claude keeps them in
+--- ~/.claude/projects/<path with every non-alphanumeric char as "-">.
+function M.last_conversation(path, projects_dir)
+  projects_dir = projects_dir or vim.fn.expand("~/.claude/projects")
+  local dir = projects_dir .. "/" .. path:gsub("[^%w-]", "-")
+  local newest
+  for _, f in ipairs(vim.fn.glob(dir .. "/*.jsonl", false, true)) do
+    local st = vim.uv.fs_stat(f)
+    if st and (not newest or st.mtime.sec > newest) then
+      newest = st.mtime.sec
+    end
+  end
+  return newest
+end
+
 return M

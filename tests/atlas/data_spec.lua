@@ -271,3 +271,105 @@ describe("atlas.data.pr_kind", function()
     assert.are.equal("review", data.pr_kind({ state = "OPEN", review = "" }))
   end)
 end)
+
+describe("atlas.data.worktrees (real git fixtures)", function()
+  local root
+
+  local function git(dir, args)
+    local r = vim.system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
+    assert(r.code == 0, "git " .. table.concat(args, " ") .. ": " .. (r.stderr or ""))
+  end
+
+  before_each(function()
+    root = vim.fn.resolve(vim.fn.tempname())
+    vim.fn.mkdir(root .. "/app", "p")
+    git(root .. "/app", { "init", "-q", "-b", "main" })
+    git(root .. "/app", { "config", "user.email", "t@example.com" })
+    git(root .. "/app", { "config", "user.name", "t" })
+    vim.fn.writefile({ "x" }, root .. "/app/f.txt")
+    git(root .. "/app", { "add", "." })
+    git(root .. "/app", { "commit", "-q", "-m", "init" })
+    git(root .. "/app", { "worktree", "add", "-q", root .. "/app.feat", "-b", "feat" })
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("lists the main checkout first, then linked worktrees with their branch", function()
+    local list = await(function(cb)
+      data.worktrees(root .. "/app", cb)
+    end)[1]
+    assert.are.same({ { path = root .. "/app", branch = "main" }, { path = root .. "/app.feat", branch = "feat" } }, list)
+  end)
+
+  it("is empty outside a repo", function()
+    vim.fn.mkdir(root .. "/plain", "p")
+    assert.are.same({}, await(function(cb)
+      data.worktrees(root .. "/plain", cb)
+    end)[1])
+  end)
+end)
+
+describe("atlas.data._parse_worktrees", function()
+  it("keeps detached worktrees (no branch) and drops bare entries", function()
+    local text = table.concat({
+      "worktree /r/bare.git",
+      "bare",
+      "",
+      "worktree /r/app",
+      "HEAD abc",
+      "branch refs/heads/main",
+      "",
+      "worktree /r/app-x",
+      "HEAD def",
+      "detached",
+      "",
+    }, "\n")
+    assert.are.same({ { path = "/r/app", branch = "main" }, { path = "/r/app-x" } }, data._parse_worktrees(text))
+  end)
+end)
+
+describe("atlas.data._claude_panes_from", function()
+  it("finds Claude as the pane's process or under it, once per pane, and not claude-status", function()
+    local panes = table.concat({
+      "%1|100|/w/direct", -- claude is the pane process
+      "%2|200|/w/shell", -- a shell that started claude
+      "%3|300|/w/nix", -- Nix's wrapper name
+      "%4|400|/w/plain", -- just a shell
+      "%5|500|/w/hook", -- a claude-status hook, not Claude
+      "%1|100|/w/direct", -- grouped sessions repeat panes
+    }, "\n")
+    local ps = table.concat({
+      "  100     1 /opt/bin/claude",
+      "  200     1 -zsh",
+      "  201   200 claude",
+      "  300     1 zsh",
+      "  301   300 /nix/store/x/bin/.claude-wrapped",
+      "  400     1 zsh",
+      "  500     1 zsh",
+      "  501   500 /home/u/.dotfiles/bin/claude-status",
+    }, "\n")
+    assert.are.same({
+      { pane = "%1", cwd = "/w/direct" },
+      { pane = "%2", cwd = "/w/shell" },
+      { pane = "%3", cwd = "/w/nix" },
+    }, data._claude_panes_from(panes, ps))
+  end)
+end)
+
+describe("atlas.data.last_conversation", function()
+  it("is the newest conversation file's time for the folder, nil without one", function()
+    local projects = vim.fn.tempname()
+    local dir = projects .. "/-w-my-app-feat"
+    vim.fn.mkdir(dir, "p")
+    vim.fn.writefile({ "{}" }, dir .. "/a.jsonl")
+    vim.fn.writefile({ "{}" }, dir .. "/b.jsonl")
+    vim.uv.fs_utime(dir .. "/a.jsonl", 1000, 1000)
+    vim.uv.fs_utime(dir .. "/b.jsonl", 2000, 2000)
+
+    assert.are.equal(2000, data.last_conversation("/w/my.app_feat", projects))
+    assert.is_nil(data.last_conversation("/w/other", projects))
+    vim.fn.delete(projects, "rf")
+  end)
+end)

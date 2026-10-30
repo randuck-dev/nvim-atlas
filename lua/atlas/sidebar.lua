@@ -17,7 +17,7 @@ local sections = require("atlas.sections")
 local M = {}
 
 local buf = nil
-local rows = {} -- line (1-indexed) -> { kind = "repo"|"session"|"worktree", ... }
+local rows = {} -- line (1-indexed) -> { kind = "section"|"repo"|"session"|"worktree"|"pane"|"idle", ... }
 local show_help = false -- full key list shown at the bottom (`?`)
 local ns = vim.api.nvim_create_namespace("atlas_sidebar")
 
@@ -136,6 +136,24 @@ local function format_elapsed(epoch)
   return math.floor(secs / 3600) .. "h"
 end
 
+-- Like format_elapsed, with days once it's past a day: for how long ago
+-- a worktree last had a conversation.
+local function format_ago(epoch)
+  local secs = epoch and (os.time() - tonumber(epoch)) or 0
+  if secs >= 86400 then
+    return math.floor(secs / 86400) .. "d ago"
+  end
+  local e = format_elapsed(epoch)
+  return e ~= "" and (e .. " ago") or ""
+end
+
+-- Notes on a worktree with no session are stored under an id of their
+-- own (annotation files are named by session id).
+local function note_id(path)
+  return "wt-" .. vim.fn.sha256(path):sub(1, 16)
+end
+M._note_id = note_id
+
 local function ensure_buf()
   if buf and vim.api.nvim_buf_is_valid(buf) then
     return buf
@@ -194,12 +212,16 @@ local function ensure_buf()
       require("atlas.unified").open(row.path, row.session_id)
     elseif row and row.kind == "session" then
       peek.open(row.session_id)
+    elseif row and row.kind == "pane" then
+      peek.open_pane(row.pane)
+    elseif row and row.kind == "idle" then
+      require("atlas.unified").open(row.path, note_id(row.path))
     end
   end, "atlas: review worktree / peek session under cursor")
 
   map("o", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
-    if not row or row.kind ~= "worktree" then
+    if not row or (row.kind ~= "worktree" and row.kind ~= "idle") then
       return
     end
     if not row.pr_url then
@@ -216,6 +238,8 @@ local function ensure_buf()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
     if row and row.kind == "worktree" then
       review.open(row.path, row.session_id)
+    elseif row and row.kind == "idle" then
+      review.open(row.path, note_id(row.path))
     end
   end, "atlas: review worktree side by side (diffview)")
 
@@ -223,6 +247,8 @@ local function ensure_buf()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
     if row and row.kind == "worktree" then
       deliver.copy_for_worktree(row.session_id, row.path, vim.fn.fnamemodify(row.path, ":t"))
+    elseif row and row.kind == "idle" then
+      deliver.copy_for_worktree(note_id(row.path), row.path, vim.fn.fnamemodify(row.path, ":t"))
     end
   end, "atlas: copy pending notes for worktree under cursor")
 
@@ -252,8 +278,33 @@ local function ensure_buf()
           M.refresh(true)
         end
       end, { own = { path = row.cwd, pane = row.pane } })
+    elseif row and row.kind == "idle" then
+      require("atlas.cleanup").run({ row.path }, function(removed)
+        if removed > 0 then
+          M.refresh(true)
+        end
+      end)
     end
   end, "atlas: clean up this session's finished worktrees")
+
+  map("c", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if not row or row.kind ~= "idle" then
+      return
+    end
+    -- Pick up where the last conversation there left off, if any.
+    local ok, err = require("atlas.spawn").open_window(row.path, row.branch or vim.fn.fnamemodify(row.path, ":t"), {
+      command = row.chat and "claude --continue" or "claude",
+    })
+    if not ok then
+      vim.notify("atlas: " .. err, vim.log.levels.ERROR)
+      return
+    end
+    vim.notify("atlas: started Claude in " .. vim.fn.fnamemodify(row.path, ":t"), vim.log.levels.INFO)
+    vim.defer_fn(function()
+      M.refresh(false)
+    end, 2000)
+  end, "atlas: start Claude in this worktree (continuing its last conversation)")
 
   map("s", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
@@ -408,6 +459,10 @@ local HINTS = {
   worktree = { { "⏎", "review" }, { "v", "split" }, { "o", "PR" }, { "y", "copy" } },
   -- A session whose folder was removed: closing it is the useful action.
   session_gone = { { "⏎", "open" }, { "X", "close session" } },
+  -- Claude running in tmux that claude-status hasn't recorded.
+  pane = { { "⏎", "open" } },
+  -- A worktree of this repo with no session in it.
+  idle = { { "⏎", "review" }, { "c", "start Claude" }, { "o", "PR" }, { "X", "clean" } },
 }
 
 local HELP = {
@@ -417,6 +472,7 @@ local HELP = {
   { "v", "worktree: side-by-side review" },
   { "o", "worktree: open its PR in browser" },
   { "n", "new worktree + session" },
+  { "c", "idle worktree: start Claude (continues)" },
   { "m", "move session to a section" },
   { "S", "new section" },
   { "R", "rename section" },
@@ -471,7 +527,87 @@ end
 
 local STATE_ORDER = { input = 1, done = 2, working = 3 }
 
-local function render(sessions, touched, pr_by_path, changed, repos)
+-- Matches the worktrees of the shown repos (extra.worktrees: root ->
+-- list) to what's running in them. A worktree is "covered" when a
+-- recorded session works in it or touched it; otherwise, if Claude runs
+-- in a tmux pane there that claude-status doesn't know (started before
+-- its hooks were installed, say), that's a "pane" row; otherwise it's
+-- an "idle" worktree. The main checkout is never idle. Returns root ->
+-- { panes = {...}, idle = {...} }.
+local function correlate(sessions, touched, extra)
+  local result = {}
+  if not extra then
+    return result
+  end
+  local all = {}
+  for root, list in pairs(extra.worktrees) do
+    for _, w in ipairs(list) do
+      all[#all + 1] = { root = root, w = w }
+    end
+  end
+  -- The deepest worktree containing `cwd` (worktrees can live inside
+  -- the main checkout, e.g. .claude/worktrees/x).
+  local function owner(cwd)
+    local best
+    for _, e in ipairs(all) do
+      local p = e.w.path
+      if (cwd == p or cwd:sub(1, #p + 1) == p .. "/") and (not best or #p > #best.w.path) then
+        best = e
+      end
+    end
+    return best
+  end
+  local function bucket(root)
+    result[root] = result[root] or { panes = {}, idle = {} }
+    return result[root]
+  end
+
+  local covered, tracked_panes, live = {}, {}, {}
+  for _, s in ipairs(sessions) do
+    live[s.session_id] = true
+    if s.tmux_pane then
+      tracked_panes[s.tmux_pane] = true
+    end
+    local o = s.cwd and owner(s.cwd)
+    if o then
+      covered[o.w.path] = true
+    end
+  end
+  for _, t in ipairs(touched) do
+    if live[t.session_id] then
+      for p, _ in pairs(t.paths) do
+        covered[p] = true
+      end
+    end
+  end
+  for _, p in ipairs(extra.panes) do
+    local o = not tracked_panes[p.pane] and owner(p.cwd)
+    if o then
+      covered[o.w.path] = true
+      table.insert(bucket(o.root).panes, { pane = p.pane, cwd = p.cwd, path = o.w.path, branch = o.w.branch })
+    end
+  end
+  for root, list in pairs(extra.worktrees) do
+    for i, w in ipairs(list) do
+      if i > 1 and not covered[w.path] and vim.fn.isdirectory(w.path) == 1 then
+        table.insert(bucket(root).idle, { path = w.path, branch = w.branch, chat = extra.chats[w.path] })
+      end
+    end
+  end
+  -- Most recently used first.
+  for _, b in pairs(result) do
+    table.sort(b.idle, function(x, y)
+      if (x.chat or 0) ~= (y.chat or 0) then
+        return (x.chat or 0) > (y.chat or 0)
+      end
+      return x.path < y.path
+    end)
+  end
+  return result
+end
+M._correlate = correlate
+
+local function render(sessions, touched, pr_by_path, changed, repos, extra)
   local by_session = {}
   for _, t in ipairs(touched) do
     by_session[t.session_id] = t
@@ -509,9 +645,18 @@ local function render(sessions, touched, pr_by_path, changed, repos)
   for _, list in pairs(in_section) do
     table.sort(list, by_state)
   end
+  -- Repos whose sessions all moved into sections still show their
+  -- other worktrees under the repo.
+  local others = correlate(sessions, touched, extra)
+  for root, b in pairs(others) do
+    if not groups[root] and (#b.panes > 0 or #b.idle > 0) then
+      groups[root] = { name = vim.fn.fnamemodify(root, ":t"), root = root, sessions = {} }
+      order[#order + 1] = root
+    end
+  end
   for _, g in pairs(groups) do
     table.sort(g.sessions, by_state)
-    g.rank = rank(g.sessions[1].state)
+    g.rank = g.sessions[1] and rank(g.sessions[1].state) or 9
   end
   -- Repos with something needing you first, then by name.
   table.sort(order, function(a, b)
@@ -637,6 +782,75 @@ local function render(sessions, touched, pr_by_path, changed, repos)
     end
   end
 
+  -- PR icon first (a blank slot without a PR, so names stay aligned).
+  -- Returns the text and adds its highlight at line index `at`.
+  local function pr_icon(pr, prefix, at)
+    local kind = pr and data.pr_kind(pr)
+    local icon = kind and PR_ICON[kind] or " "
+    if kind then
+      highlights[#highlights + 1] = { at, #prefix, #prefix + #icon, PR_HL[kind] }
+    end
+    return prefix .. icon .. " "
+  end
+  local function pr_badge(pr, line, at)
+    if not pr then
+      return line
+    end
+    local start = #line
+    line = line .. string.format("  #%d %s", pr.number, CHECK_GLYPH[pr.checks] or "•")
+    highlights[#highlights + 1] = { at, start, #line, CHECK_HL[pr.checks] or "AtlasCheckNone" }
+    return line
+  end
+
+  -- Claude running in tmux that claude-status doesn't know about.
+  local function add_pane(p, group, header, root)
+    local name = p.branch or vim.fn.fnamemodify(p.path, ":t")
+    local line = "  ◇ " .. name
+    local tag_start = #line
+    line = line .. "  not tracked"
+    lines[#lines + 1] = line
+    rows[#lines] = { kind = "pane", pane = p.pane, cwd = p.cwd, path = p.path, root = root, group = group, header = header }
+    highlights[#highlights + 1] = { #lines - 1, 2, 2 + #"◇", "AtlasHint" }
+    highlights[#highlights + 1] = { #lines - 1, tag_start, #line, "AtlasHint" }
+  end
+
+  -- A worktree of the repo with no session in it.
+  local function add_idle(w, group, header, root)
+    local pr = pr_by_path[w.path]
+    local at = #lines
+    local line = pr_icon(pr, "  ", at) .. vim.fn.fnamemodify(w.path, ":t")
+    local name_start = #line - #vim.fn.fnamemodify(w.path, ":t")
+    highlights[#highlights + 1] = { at, name_start, #line, "AtlasHint" }
+    line = pr_badge(pr, line, at)
+    local notes = annotate.pending_for(note_id(w.path), w.path)
+    if notes > 0 then
+      local start = #line
+      line = line .. string.format("  [%d note%s]", notes, notes == 1 and "" or "s")
+      highlights[#highlights + 1] = { at, start, #line, "AtlasNoteBadge" }
+    end
+    if changed and changed[w.path] then
+      local start = #line
+      line = line .. "  changes"
+      highlights[#highlights + 1] = { at, start, #line, "AtlasStateInput" }
+    end
+    local ago = w.chat and format_ago(w.chat) or ""
+    local tail = ago ~= "" and ("chat " .. ago) or "no chat"
+    local start = #line
+    line = line .. "  " .. tail
+    highlights[#highlights + 1] = { at, start, #line, "Comment" }
+    lines[#lines + 1] = line
+    rows[#lines] = {
+      kind = "idle",
+      path = w.path,
+      branch = w.branch,
+      chat = w.chat,
+      pr_url = pr and pr.url,
+      root = root,
+      group = group,
+      header = header,
+    }
+  end
+
   -- A section or repo header. Collapsed, it shows how many sessions are
   -- folded away, and a ● if any of them is waiting on you -- folding
   -- should never hide that. Returns whether it's collapsed and its line.
@@ -697,6 +911,15 @@ local function render(sessions, touched, pr_by_path, changed, repos)
       for _, session in ipairs(g.sessions) do
         add_session(session, false, gkey, header)
       end
+      local b = g.root and others[g.root]
+      if b then
+        for _, p in ipairs(b.panes) do
+          add_pane(p, gkey, header, g.root)
+        end
+        for _, w in ipairs(b.idle) do
+          add_idle(w, gkey, header, g.root)
+        end
+      end
     end
   end
 
@@ -738,14 +961,14 @@ end
 
 -- Last local data rendered, so reopening the sidebar (or a PR fetch
 -- finishing) can render instantly without waiting on claude-status.
-local last = nil -- { sessions, touched, changed }
+local last = nil -- { sessions, touched, changed, extra }
 local repo_cache = {} -- session cwd -> { root, name }, or false if not a repo
 local pr_in_flight = false
 local changes_in_flight = false
 
 local function render_last()
   if last and is_open() then
-    render(vim.deepcopy(last.sessions), last.touched, pr_cache, last.changed, repo_cache)
+    render(vim.deepcopy(last.sessions), last.touched, pr_cache, last.changed, repo_cache, last.extra)
   end
 end
 
@@ -758,26 +981,79 @@ end
 -- GitHub PR/CI status is slow (measured ~2s for 4 worktrees: a git call
 -- per worktree plus a `gh pr list` per repo, over the network), so it
 -- never blocks a render: fetch in the background, re-render on arrival.
-local function refresh_prs(touched)
+local function refresh_prs(paths)
   if pr_in_flight then
     return
   end
   pr_in_flight = true
-  local paths, seen = {}, {}
-  for _, t in ipairs(touched) do
-    for path, _ in pairs(t.paths) do
-      if not seen[path] then
-        seen[path] = true
-        paths[#paths + 1] = path
-      end
-    end
-  end
   data.pr_status(paths, function(pr_by_path)
     pr_in_flight = false
     pr_cache = pr_by_path
     pr_fetched_at = vim.uv.now()
     render_last()
   end)
+end
+
+-- The worktrees of every repo a live session is in, the tmux panes
+-- running Claude, and when each worktree last had a conversation.
+-- cb({ worktrees = root -> list, panes = list, chats = path -> epoch }).
+local function load_extra(sessions, cb)
+  local roots, seen = {}, {}
+  for _, s in ipairs(sessions) do
+    local r = s.cwd and repo_cache[s.cwd]
+    if r and not seen[r.root] then
+      seen[r.root] = true
+      roots[#roots + 1] = r.root
+    end
+  end
+  local extra = { worktrees = {}, panes = {}, chats = {} }
+  local pending = #roots + 1
+  local function done()
+    pending = pending - 1
+    if pending == 0 then
+      for _, list in pairs(extra.worktrees) do
+        for _, w in ipairs(list) do
+          extra.chats[w.path] = data.last_conversation(w.path)
+        end
+      end
+      cb(extra)
+    end
+  end
+  for _, root in ipairs(roots) do
+    data.worktrees(root, function(list)
+      extra.worktrees[root] = list
+      done()
+    end)
+  end
+  data.claude_panes(function(panes)
+    extra.panes = panes
+    done()
+  end)
+end
+
+-- Every worktree worth checking for changes and PRs: those sessions
+-- touched, plus the repos' other worktrees (not main checkouts).
+local function review_paths(touched, extra)
+  local paths, seen = {}, {}
+  local function add(p)
+    if not seen[p] and vim.fn.isdirectory(p) == 1 then
+      seen[p] = true
+      paths[#paths + 1] = p
+    end
+  end
+  for _, t in ipairs(touched) do
+    for p, _ in pairs(t.paths) do
+      add(p)
+    end
+  end
+  for _, list in pairs(extra and extra.worktrees or {}) do
+    for i, w in ipairs(list) do
+      if i > 1 then
+        add(w.path)
+      end
+    end
+  end
+  return paths
 end
 
 --- Re-reads claude-status and re-renders right away with the PR/CI
@@ -807,7 +1083,36 @@ function M.refresh(force)
       -- Render now with the previous change check, then re-check which
       -- worktrees have changes (local git, a few calls per worktree) and
       -- re-render if anything appeared or disappeared.
-      last = { sessions = sessions, touched = touched, changed = last and last.changed }
+      last = { sessions = sessions, touched = touched, changed = last and last.changed, extra = last and last.extra }
+
+      -- Once the repos are known: their worktrees and any Claude
+      -- running in tmux, then which worktrees have changes, then PRs.
+      local function after_repos()
+        render_last()
+        load_extra(sessions, function(extra)
+          if not last then
+            return
+          end
+          if not vim.deep_equal(last.extra, extra) then
+            last.extra = extra
+            render_last()
+          end
+          local paths = review_paths(touched, extra)
+          if not changes_in_flight then
+            changes_in_flight = true
+            data.changed(paths, function(set)
+              changes_in_flight = false
+              if last and not vim.deep_equal(last.changed, set) then
+                last.changed = set
+                render_last()
+              end
+            end)
+          end
+          if force or vim.uv.now() - pr_fetched_at >= config.pr_poll_ms then
+            refresh_prs(paths)
+          end
+        end)
+      end
 
       -- Which repo owns each session's folder. Only new folders are
       -- looked up (a folder's repo doesn't change), in parallel, a few
@@ -821,40 +1126,16 @@ function M.refresh(force)
       end
       local pending = #unknown
       if pending == 0 then
-        render_last()
+        after_repos()
       end
       for _, cwd in ipairs(unknown) do
         data.repo_of(cwd, function(repo)
           repo_cache[cwd] = repo or false
           pending = pending - 1
           if pending == 0 then
-            render_last()
+            after_repos()
           end
         end)
-      end
-
-      if not changes_in_flight then
-        changes_in_flight = true
-        local paths, seen = {}, {}
-        for _, t in ipairs(touched) do
-          for p, _ in pairs(t.paths) do
-            if not seen[p] and vim.fn.isdirectory(p) == 1 then
-              seen[p] = true
-              paths[#paths + 1] = p
-            end
-          end
-        end
-        data.changed(paths, function(set)
-          changes_in_flight = false
-          if last and not vim.deep_equal(last.changed, set) then
-            last.changed = set
-            render_last()
-          end
-        end)
-      end
-
-      if force or vim.uv.now() - pr_fetched_at >= config.pr_poll_ms then
-        refresh_prs(touched)
       end
     end)
   end)
@@ -919,7 +1200,8 @@ function M._polling()
   return timer ~= nil and not timer:is_closing()
 end
 
---- Focuses the sidebar (if open) with the cursor on session_id's row.
+--- Focuses the sidebar (if open) with the cursor on session_id's row
+--- (or, for Claude claude-status doesn't know, the pane id's row).
 --- Returns true if it found the window.
 function M.focus_session(session_id)
   local win = buf and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) or -1
@@ -929,7 +1211,7 @@ function M.focus_session(session_id)
   vim.api.nvim_set_current_win(win)
   for lnum = 1, vim.api.nvim_buf_line_count(buf) do
     local row = rows[lnum]
-    if row and row.kind == "session" and row.session_id == session_id then
+    if row and ((row.kind == "session" and row.session_id == session_id) or (row.kind == "pane" and row.pane == session_id)) then
       vim.api.nvim_win_set_cursor(win, { lnum, 0 })
       break
     end

@@ -36,6 +36,20 @@ In the sidebar, the top bar shows the keys for the row under the cursor;
 | `←` `→` | on a section/repo header: collapse / expand (`⏎` also expands; `h`/`l` work too); inside a group, `←` collapses it | |
 | `?`    | show/hide all keys                       | same                                 |
 
+Under each repo, after its sessions, the sidebar also lists the repo's
+other worktrees (from `git worktree list`), matched to what's running in
+them:
+
+- `◇ branch  not tracked`: Claude is running in a tmux pane there, but
+  claude-status doesn't know it (it started before the hooks were
+  installed, for example). `⏎` opens its live view.
+- A plain worktree row: no session in it. It shows PR status, whether it
+  has changes, and when it last had a Claude conversation. `⏎` reviews
+  it, `v`, `o`, `y` and `X` work as on other worktree rows, and `c`
+  starts Claude there in a new tmux window (`claude --continue` when it
+  had a conversation before). Notes left in its review are kept for
+  that worktree; `y` copies them.
+
 Sections are your own groupings ("to deploy", "observability", ...):
 `S` makes one, `m` on a session moves it in (or out), and on a section
 row `R` renames it and `d` deletes it (its sessions go back under their

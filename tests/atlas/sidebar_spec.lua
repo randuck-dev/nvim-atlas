@@ -26,12 +26,27 @@ end
 describe("atlas.sidebar", function()
   before_each(function()
     real.sessions, real.touched, real.pr_status, real.changed, real.repo_of = data.sessions, data.touched, data.pr_status, data.changed, data.repo_of
+    real.worktrees, real.claude_panes, real.last_conversation = data.worktrees, data.claude_panes, data.last_conversation
     pr_calls = 0
     state = {
       sessions = { { session_id = "s1", state = "done", title = "first session", since = os.time() } },
       touched = { { session_id = "s1", paths = { ["/tmp/atlas-sb/repo-a"] = os.time() } } },
       changed = { ["/tmp/atlas-sb/repo-a"] = true },
+      worktrees = {}, -- repo root -> { {path, branch}, ... }
+      panes = {}, -- tmux panes running Claude: { {pane, cwd}, ... }
+      chats = {}, -- worktree path -> last conversation epoch
     }
+    -- Never the real tmux panes or ~/.claude: the developer's own
+    -- sessions would show up in the tests.
+    data.worktrees = function(root, cb)
+      cb(vim.deepcopy(state.worktrees[root] or {}))
+    end
+    data.claude_panes = function(cb)
+      cb(vim.deepcopy(state.panes))
+    end
+    data.last_conversation = function(path)
+      return state.chats[path]
+    end
     -- Folders under /work/<repo>[-anything] belong to <repo>.
     data.repo_of = function(dir, cb)
       local name = dir:match("^/work/([%w]+)")
@@ -70,6 +85,7 @@ describe("atlas.sidebar", function()
       sidebar.toggle() -- close
     end
     data.sessions, data.touched, data.pr_status, data.changed, data.repo_of = real.sessions, real.touched, real.pr_status, real.changed, real.repo_of
+    data.worktrees, data.claude_panes, data.last_conversation = real.worktrees, real.claude_panes, real.last_conversation
     sidebar.configure({ poll_ms = 5000, pr_poll_ms = 30000 })
     vim.cmd("silent! tabclose")
     vim.fn.delete("/tmp/atlas-sb", "rf")
@@ -219,6 +235,119 @@ describe("atlas.sidebar", function()
     assert.is_true(alpha_at < text:find("alpha other", 1, true))
     assert.is_true(text:find("alpha work", 1, true) < beta_at)
     assert.is_true(beta_at < text:find("beta work", 1, true))
+  end)
+
+  describe("the repo's other worktrees", function()
+    local R = "/tmp/atlas-sb/app"
+    local peek = require("atlas.peek")
+    local spawn = require("atlas.spawn")
+    local real_open_pane, real_open_window
+
+    before_each(function()
+      real_open_pane, real_open_window = peek.open_pane, spawn.open_window
+      for _, d in ipairs({ "", ".feat", ".old", ".pane/sub", ".touched" }) do
+        vim.fn.mkdir(R .. d, "p")
+      end
+      data.repo_of = function(dir, cb)
+        cb(dir:find("^/tmp/atlas%-sb/app") and { root = R, name = "app" } or nil)
+      end
+      state.sessions = { { session_id = "a", state = "done", title = "main work", cwd = R, tmux_pane = "%1", since = os.time() } }
+      state.touched = { { session_id = "a", paths = { [R .. ".touched"] = os.time() } } }
+      state.changed = { [R .. ".feat"] = true }
+      state.worktrees[R] = {
+        { path = R, branch = "main" },
+        { path = R .. ".feat", branch = "feat" },
+        { path = R .. ".old", branch = "old" },
+        { path = R .. ".pane", branch = "pane-branch" },
+        { path = R .. ".touched", branch = "touched" },
+        { path = R .. ".gone", branch = "gone" }, -- not on disk
+      }
+      state.panes = {
+        { pane = "%1", cwd = R }, -- the recorded session itself
+        { pane = "%77", cwd = R .. ".pane/sub" }, -- Claude claude-status doesn't know
+      }
+      state.chats = { [R .. ".feat"] = os.time() - 2 * 86400 }
+    end)
+
+    after_each(function()
+      peek.open_pane, spawn.open_window = real_open_pane, real_open_window
+    end)
+
+    local function open_and_wait()
+      sidebar.toggle()
+      assert.is_true(wait_for(function()
+        local t = sidebar_text()
+        return t and t:find("app.old", 1, true) ~= nil and t:find("changes", 1, true) ~= nil
+      end), "expected the repo's other worktrees")
+      local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+      vim.api.nvim_set_current_win(win)
+      return win, vim.split(sidebar_text(), "\n")
+    end
+
+    local function line_of(lines, text)
+      for i, l in ipairs(lines) do
+        if l:find(text, 1, true) then
+          return i
+        end
+      end
+    end
+
+    it("lists untracked Claude panes, then idle worktrees by last conversation, under the repo", function()
+      local _, lines = open_and_wait()
+      assert.are.equal("▾ app", lines[1])
+      assert.truthy(lines[2]:find("main work", 1, true))
+      assert.truthy(lines[3]:find("◇ pane-branch  not tracked", 1, true))
+      assert.truthy(lines[4]:find("app.feat", 1, true))
+      assert.truthy(lines[4]:find("changes", 1, true))
+      assert.truthy(lines[4]:find("chat 2d ago", 1, true))
+      assert.truthy(lines[5]:find("app.old", 1, true))
+      assert.truthy(lines[5]:find("no chat", 1, true))
+      -- Covered by the session, the recorded pane, or not on disk.
+      assert.is_nil(line_of(lines, "app.touched  "), "a touched worktree isn't idle")
+      assert.is_nil(line_of(lines, "app.gone"))
+      assert.is_nil(line_of(lines, "◇ main"), "the recorded session's pane isn't listed again")
+    end)
+
+    it("⏎ on an untracked pane opens its live view; the legend fits each row", function()
+      local opened
+      peek.open_pane = function(pane)
+        opened = pane
+      end
+      local win, lines = open_and_wait()
+      vim.api.nvim_win_set_cursor(win, { line_of(lines, "not tracked"), 0 })
+      vim.api.nvim_exec_autocmds("CursorMoved", { buffer = vim.api.nvim_win_get_buf(win) })
+      assert.truthy(vim.wo[win].winbar:find("open", 1, true))
+      vim.api.nvim_feedkeys(vim.keycode("<CR>"), "x", false)
+      assert.are.equal("%77", opened)
+
+      vim.api.nvim_win_set_cursor(win, { line_of(lines, "app.old"), 0 })
+      vim.api.nvim_exec_autocmds("CursorMoved", { buffer = vim.api.nvim_win_get_buf(win) })
+      assert.truthy(vim.wo[win].winbar:find("start Claude", 1, true))
+    end)
+
+    it("c starts Claude in an idle worktree, continuing its last conversation if it had one", function()
+      local started = {}
+      spawn.open_window = function(path, name, opts)
+        started[#started + 1] = { path = path, name = name, command = opts.command }
+        return true
+      end
+      local win, lines = open_and_wait()
+      vim.api.nvim_win_set_cursor(win, { line_of(lines, "app.feat"), 0 })
+      vim.api.nvim_feedkeys("c", "x", false)
+      vim.api.nvim_win_set_cursor(win, { line_of(lines, "app.old"), 0 })
+      vim.api.nvim_feedkeys("c", "x", false)
+      assert.are.same({
+        { path = R .. ".feat", name = "feat", command = "claude --continue" },
+        { path = R .. ".old", name = "old", command = "claude" },
+      }, started)
+    end)
+
+    it("focus_session finds an untracked pane's row by its pane id", function()
+      local win, lines = open_and_wait()
+      vim.cmd("wincmd l")
+      assert.is_true(sidebar.focus_session("%77"))
+      assert.are.equal(line_of(lines, "not tracked"), vim.api.nvim_win_get_cursor(win)[1])
+    end)
   end)
 
   it("starts a new worktree in the repo under the cursor with n", function()

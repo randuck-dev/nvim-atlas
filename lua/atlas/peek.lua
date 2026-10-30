@@ -122,12 +122,12 @@ local function create_view(pane)
   return view
 end
 
---- Leaves terminal mode and focuses the sidebar on session_id's row.
+--- Leaves terminal mode and focuses the sidebar on the row for `key`.
 --- The view keeps running next to it.
-local function back_to_sidebar(session_id)
+local function back_to_sidebar(key)
   vim.cmd("stopinsert")
   vim.schedule(function()
-    require("atlas.sidebar").focus_session(session_id)
+    require("atlas.sidebar").focus_session(key)
   end)
 end
 
@@ -144,9 +144,10 @@ end
 
 --- Opens a real interactive terminal onto session_id's tmux pane in the
 --- window next to the sidebar (or a new vsplit if the sidebar is the
---- only window), already in terminal mode for typing; `i` to type again, <C-q> (configurable) to go
---- back to the sidebar, `q` in normal mode to close it. No-ops (with a warning)
---- if the session isn't live or has no recorded tmux pane.
+--- only window), already in terminal mode for typing. <C-q>
+--- (configurable) goes back to the sidebar, `q` in normal mode closes
+--- it. No-ops (with a warning) if the session isn't live or has no
+--- recorded tmux pane.
 function M.open(session_id)
   data.sessions(function(sessions, err)
     if err then
@@ -169,9 +170,18 @@ function M.open(session_id)
       vim.notify("atlas: no tmux pane recorded for this session", vim.log.levels.WARN)
       return
     end
+    M.open_pane(pane, session_id)
+  end)
+end
 
+--- Like open(), for a tmux pane directly (e.g. a Claude claude-status
+--- doesn't know about). `key` is what the sidebar knows the row by
+--- (session id or pane id), for jumping back to it; default: the pane.
+function M.open_pane(pane, key)
+  key = key or pane
+  do
     -- Same session already showing: jump back into it, typing.
-    if current and current.session_id == session_id and vim.api.nvim_buf_is_valid(current.buf) then
+    if current and current.key == key and vim.api.nvim_buf_is_valid(current.buf) then
       local win = vim.fn.bufwinid(current.buf)
       if win ~= -1 then
         vim.api.nvim_set_current_win(win)
@@ -219,13 +229,13 @@ function M.open(session_id)
       return
     end
 
-    current = { buf = buf, job = job, view = view, session_id = session_id }
+    current = { buf = buf, job = job, view = view, key = key }
     -- Straight into terminal mode: no `A`/`i` needed to start typing.
     vim.cmd("startinsert")
 
     vim.keymap.set("n", "q", stop_current, { buffer = buf, nowait = true, desc = "atlas: close session view" })
     vim.keymap.set({ "t", "n" }, leave_key, function()
-      back_to_sidebar(session_id)
+      back_to_sidebar(key)
     end, { buffer = buf, nowait = true, desc = "atlas: back to the sidebar" })
     vim.api.nvim_create_autocmd("TermEnter", {
       buffer = buf,
@@ -242,7 +252,7 @@ function M.open(session_id)
         end
       end,
     })
-  end)
+  end
 end
 
 return M
