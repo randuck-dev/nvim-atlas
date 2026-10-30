@@ -5,6 +5,7 @@ local annotate = require("atlas.annotate")
 -- The sidebar's three data sources, swapped for fixtures so tests can
 -- change what claude-status/gh "report" and count gh calls.
 local real = {}
+local sections_file
 local state
 local pr_calls
 
@@ -56,6 +57,8 @@ describe("atlas.sidebar", function()
       cb({ ["/tmp/atlas-sb/repo-a"] = { number = 42, state = "OPEN", checks = "passing" } })
     end
     sidebar._reset()
+    sections_file = vim.fn.tempname() .. "/sections.json"
+    require("atlas.sections")._set_path(sections_file)
     sidebar.configure({ poll_ms = 100, pr_poll_ms = 60000 })
     -- The sidebar hides worktrees that don't exist on disk.
     vim.fn.mkdir("/tmp/atlas-sb/repo-a", "p")
@@ -70,6 +73,8 @@ describe("atlas.sidebar", function()
     sidebar.configure({ poll_ms = 5000, pr_poll_ms = 30000 })
     vim.cmd("silent! tabclose")
     vim.fn.delete("/tmp/atlas-sb", "rf")
+    require("atlas.sections")._set_path(nil)
+    vim.fn.delete(vim.fn.fnamemodify(sections_file, ":h"), "rf")
   end)
 
   it("lists sessions with their touched worktrees and PR/CI status", function()
@@ -263,11 +268,12 @@ describe("atlas.sidebar", function()
     assert.truthy(repo_bar:find("new worktree", 1, true))
     assert.falsy(repo_bar:find("send", 1, true))
     assert.truthy(session_bar:find("send", 1, true))
-    assert.truthy(session_bar:find("clean up", 1, true))
+    assert.truthy(session_bar:find("clean", 1, true))
+    assert.truthy(session_bar:find("move", 1, true))
     assert.truthy(worktree_bar:find("diff", 1, true))
     assert.truthy(worktree_bar:find("copy notes", 1, true))
     for _, bar in ipairs({ repo_bar, session_bar, worktree_bar }) do
-      assert.truthy(bar:find("all keys", 1, true), "every row should point at ? for the full list")
+      assert.truthy(bar:gsub("%%#[%w_]+#", ""):find("? more", 1, true), "every row should point at ? for the full list")
     end
   end)
 
@@ -285,7 +291,7 @@ describe("atlas.sidebar", function()
     local text = sidebar_text()
     assert.truthy(text:find("clean up finished worktrees", 1, true))
     assert.truthy(text:find("<leader>aa", 1, true))
-    assert.truthy(vim.wo[win].winbar:find("hide keys", 1, true))
+    assert.truthy(vim.wo[win].winbar:gsub("%%#[%w_]+#", ""):find("? less", 1, true))
 
     -- Descriptions line up even though "⏎" is several bytes wide.
     local cols = {}
@@ -335,6 +341,142 @@ describe("atlas.sidebar", function()
     vim.api.nvim_feedkeys("X", "x", false)
     cleanup.close_pane, vim.ui.select = real_close, real_select
     assert.are.equal("%999", closed)
+  end)
+
+  describe("sections", function()
+    local sections = require("atlas.sections")
+    local real_select, real_input
+
+    before_each(function()
+      real_select, real_input = vim.ui.select, vim.ui.input
+      vim.fn.mkdir("/tmp/atlas-sb/alpha", "p")
+      vim.fn.mkdir("/tmp/atlas-sb/beta", "p")
+      data.repo_of = function(dir, cb)
+        local name = dir:match("^/tmp/atlas%-sb/(%a+)$")
+        cb(name and { root = dir, name = name } or nil)
+      end
+      state.sessions = {
+        { session_id = "a", state = "done", title = "alpha work", cwd = "/tmp/atlas-sb/alpha", tmux_pane = "%1", since = os.time() },
+        { session_id = "b", state = "done", title = "beta work", cwd = "/tmp/atlas-sb/beta", tmux_pane = "%2", since = os.time() },
+      }
+      state.touched = {}
+    end)
+
+    after_each(function()
+      vim.ui.select, vim.ui.input = real_select, real_input
+    end)
+
+    local function open_and_wait(text)
+      sidebar.toggle()
+      assert.is_true(wait_for(function()
+        local t = sidebar_text()
+        return t and t:find(text, 1, true) ~= nil
+      end))
+      local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+      vim.api.nvim_set_current_win(win)
+      return win
+    end
+
+    local function line_of(text)
+      for i, l in ipairs(vim.split(sidebar_text(), "\n")) do
+        if l:find(text, 1, true) then
+          return i
+        end
+      end
+    end
+
+    it("shows sections first, with their sessions and the repo name, the rest by repo", function()
+      sections.assign("a", "to deploy")
+      sections.add("observability")
+      open_and_wait("beta work")
+
+      local lines = vim.split(sidebar_text(), "\n")
+      assert.are.equal("▾ to deploy", lines[1])
+      assert.truthy(lines[2]:find("alpha work", 1, true))
+      assert.truthy(lines[2]:find("alpha", #"  ◆ alpha work", true), "repo name shown under a section")
+      assert.are.equal("▾ observability", lines[3])
+      assert.truthy(lines[4]:find("(empty", 1, true))
+      assert.are.equal("▾ beta", lines[5])
+      assert.truthy(lines[6]:find("beta work", 1, true))
+      assert.is_nil(line_of("▾ alpha"), "a session in a section isn't also listed under its repo")
+    end)
+
+    it("m moves a session into a chosen section", function()
+      sections.add("observability")
+      local win = open_and_wait("beta work")
+      vim.ui.select = function(choices, _, on_choice)
+        assert.truthy(vim.tbl_contains(choices, "observability"))
+        assert.truthy(vim.tbl_contains(choices, "+ new section…"))
+        on_choice("observability")
+      end
+      vim.api.nvim_win_set_cursor(win, { line_of("beta work"), 0 })
+      vim.api.nvim_feedkeys("m", "x", false)
+
+      assert.are.equal("observability", sections.section_of("b"))
+      assert.is_true(line_of("▾ observability") < line_of("beta work"))
+      assert.is_nil(line_of("▾ beta"))
+    end)
+
+    it("m can make a new section on the spot", function()
+      local win = open_and_wait("alpha work")
+      vim.ui.select = function(_, _, on_choice)
+        on_choice("+ new section…")
+      end
+      vim.ui.input = function(_, cb)
+        cb("to deploy")
+      end
+      vim.api.nvim_win_set_cursor(win, { line_of("alpha work"), 0 })
+      vim.api.nvim_feedkeys("m", "x", false)
+
+      assert.are.equal("to deploy", sections.section_of("a"))
+      assert.are.equal(1, line_of("▾ to deploy"))
+    end)
+
+    it("m can take a session back out of its section", function()
+      sections.assign("a", "to deploy")
+      local win = open_and_wait("alpha work")
+      vim.ui.select = function(choices, _, on_choice)
+        on_choice(choices[#choices]) -- "remove from to deploy"
+      end
+      vim.api.nvim_win_set_cursor(win, { line_of("alpha work"), 0 })
+      vim.api.nvim_feedkeys("m", "x", false)
+
+      assert.is_nil(sections.section_of("a"))
+      assert.is_true(line_of("▾ alpha") < line_of("alpha work"))
+    end)
+
+    it("S makes an empty section; d deletes one and its sessions go back to their repo", function()
+      local win = open_and_wait("alpha work")
+      vim.ui.input = function(_, cb)
+        cb("observability")
+      end
+      vim.api.nvim_feedkeys("S", "x", false)
+      assert.truthy(line_of("▾ observability"))
+
+      sections.assign("a", "observability")
+      sidebar.redraw()
+      vim.ui.select = function(_, _, on_choice)
+        on_choice("Delete section")
+      end
+      vim.api.nvim_win_set_cursor(win, { line_of("▾ observability"), 0 })
+      vim.api.nvim_feedkeys("d", "x", false)
+
+      assert.is_nil(line_of("▾ observability"))
+      assert.is_true(line_of("▾ alpha") < line_of("alpha work"))
+    end)
+
+    it("R renames a section", function()
+      sections.assign("a", "obs")
+      local win = open_and_wait("alpha work")
+      vim.ui.input = function(_, cb)
+        cb("observability")
+      end
+      vim.api.nvim_win_set_cursor(win, { line_of("▾ obs"), 0 })
+      vim.api.nvim_feedkeys("R", "x", false)
+
+      assert.truthy(line_of("▾ observability"))
+      assert.are.equal("observability", sections.section_of("a"))
+    end)
   end)
 
   it("hides worktrees that no longer exist on disk", function()

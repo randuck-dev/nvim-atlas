@@ -12,6 +12,7 @@ local review = require("atlas.review")
 local annotate = require("atlas.annotate")
 local deliver = require("atlas.deliver")
 local peek = require("atlas.peek")
+local sections = require("atlas.sections")
 
 local M = {}
 
@@ -52,6 +53,7 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AtlasCheckNone", { fg = "#6e6a86", default = true })
   vim.api.nvim_set_hl(0, "AtlasNoteBadge", { fg = "#ebbcba", default = true }) -- rose
   vim.api.nvim_set_hl(0, "AtlasRepo", { fg = "#9ccfd8", bold = true, default = true }) -- foam
+  vim.api.nvim_set_hl(0, "AtlasSection", { fg = "#c4a7e7", bold = true, default = true }) -- iris
   vim.api.nvim_set_hl(0, "AtlasKey", { fg = "#f6c177", bold = true, default = true }) -- gold
   vim.api.nvim_set_hl(0, "AtlasHint", { fg = "#6e6a86", default = true }) -- muted
 end
@@ -164,6 +166,97 @@ local function ensure_buf()
   map("r", function()
     M.refresh(true)
   end, "atlas: refresh now (including PR/CI)")
+  -- Sections: your own groupings, e.g. "to deploy", "observability".
+  local function new_section(then_assign)
+    vim.ui.input({ prompt = "New section name: " }, function(name)
+      name = name and vim.trim(name) or ""
+      if name == "" then
+        return
+      end
+      if then_assign then
+        sections.assign(then_assign, name)
+      else
+        local ok, err = sections.add(name)
+        if not ok then
+          vim.notify("atlas: " .. err, vim.log.levels.WARN)
+          return
+        end
+      end
+      M.redraw()
+    end)
+  end
+
+  map("S", function()
+    new_section(nil)
+  end, "atlas: new section")
+
+  map("m", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if not row or row.kind ~= "session" then
+      vim.notify("atlas: put the cursor on a session to move it", vim.log.levels.WARN)
+      return
+    end
+    local current = sections.section_of(row.session_id)
+    local NEW = "+ new section…"
+    local choices = {}
+    for _, n in ipairs(sections.list()) do
+      if n ~= current then
+        choices[#choices + 1] = n
+      end
+    end
+    choices[#choices + 1] = NEW
+    local remove = current and ("remove from " .. current) or nil
+    if remove then
+      choices[#choices + 1] = remove
+    end
+    vim.ui.select(choices, { prompt = "Move session to:" }, function(choice)
+      if not choice then
+        return
+      elseif choice == NEW then
+        new_section(row.session_id)
+      elseif choice == remove then
+        sections.assign(row.session_id, nil)
+        M.redraw()
+      else
+        sections.assign(row.session_id, choice)
+        M.redraw()
+      end
+    end)
+  end, "atlas: move session to a section")
+
+  map("R", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if not row or row.kind ~= "section" then
+      return
+    end
+    vim.ui.input({ prompt = "Rename section: ", default = row.name }, function(name)
+      if not name then
+        return
+      end
+      local ok, err = sections.rename(row.name, name)
+      if not ok then
+        vim.notify("atlas: " .. err, vim.log.levels.WARN)
+        return
+      end
+      M.redraw()
+    end)
+  end, "atlas: rename section")
+
+  map("d", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if not row or row.kind ~= "section" then
+      return
+    end
+    vim.ui.select({ "Delete section", "Cancel" }, {
+      prompt = "Delete section '" .. row.name .. "'? Its sessions go back under their repos.",
+    }, function(choice)
+      if choice == "Delete section" then
+        sections.remove(row.name)
+        M.redraw()
+      end
+    end)
+  end, "atlas: delete section")
+
   map("q", function()
     vim.cmd("close")
   end, "atlas: close sidebar")
@@ -189,8 +282,9 @@ end
 -- wouldn't show) lists the keys for the row under the cursor; `?` adds
 -- the full list at the bottom.
 local HINTS = {
-  repo = { { "n", "new worktree" } },
-  session = { { "⏎", "open" }, { "s", "send" }, { "X", "clean up" }, { "n", "new" } },
+  repo = { { "n", "new worktree" }, { "S", "new section" } },
+  section = { { "R", "rename" }, { "d", "delete" }, { "S", "new" } },
+  session = { { "⏎", "open" }, { "s", "send" }, { "m", "move" }, { "X", "clean" } },
   worktree = { { "⏎", "diff" }, { "y", "copy notes" } },
   -- A session whose folder was removed: closing it is the useful action.
   session_gone = { { "⏎", "open" }, { "X", "close session" } },
@@ -200,6 +294,10 @@ local HELP = {
   { "⏎", "session: open live view" },
   { "", "worktree: review diff" },
   { "n", "new worktree + session" },
+  { "m", "move session to a section" },
+  { "S", "new section" },
+  { "R", "rename section" },
+  { "d", "delete section" },
   { "s", "send notes to session" },
   { "X", "clean up finished worktrees" },
   { "y", "copy a worktree's notes" },
@@ -215,7 +313,7 @@ function M.legend_for(kind)
   for _, h in ipairs(HINTS[kind] or {}) do
     parts[#parts + 1] = "%#AtlasKey#" .. h[1] .. "%#AtlasHint# " .. h[2]
   end
-  parts[#parts + 1] = "%#AtlasKey#?%#AtlasHint# " .. (show_help and "hide keys" or "all keys")
+  parts[#parts + 1] = "%#AtlasKey#?%#AtlasHint# " .. (show_help and "less" or "more")
   return "%#AtlasHint#" .. table.concat(parts, "  ")
 end
 
@@ -254,25 +352,40 @@ local function render(sessions, touched, pr_by_path, changed, repos)
   for _, t in ipairs(touched) do
     by_session[t.session_id] = t
   end
-
-  -- Group sessions by the repo that owns their folder.
-  local groups, order = {}, {}
-  for _, session in ipairs(sessions) do
-    local key, name, root = repo_group(repos, session.cwd or "")
-    if not groups[key] then
-      groups[key] = { name = name, root = root, sessions = {} }
-      order[#order + 1] = key
-    end
-    table.insert(groups[key].sessions, session)
-  end
   local function rank(state)
     return STATE_ORDER[state] or 9
   end
+  -- needing attention first, then finished, then working
+  local function by_state(a, b)
+    return rank(a.state) < rank(b.state)
+  end
+
+  -- Sessions the user moved into a section go there; the rest are
+  -- grouped by the repo that owns their folder.
+  local sec = sections.load()
+  local in_section = {}
+  for _, name in ipairs(sec.sections) do
+    in_section[name] = {}
+  end
+  local groups, order = {}, {}
+  for _, session in ipairs(sessions) do
+    local section = sec.assign[session.session_id]
+    if section and in_section[section] then
+      table.insert(in_section[section], session)
+    else
+      local key, name, root = repo_group(repos, session.cwd or "")
+      if not groups[key] then
+        groups[key] = { name = name, root = root, sessions = {} }
+        order[#order + 1] = key
+      end
+      table.insert(groups[key].sessions, session)
+    end
+  end
+  for _, list in pairs(in_section) do
+    table.sort(list, by_state)
+  end
   for _, g in pairs(groups) do
-    -- needing attention first, then finished, then working
-    table.sort(g.sessions, function(a, b)
-      return rank(a.state) < rank(b.state)
-    end)
+    table.sort(g.sessions, by_state)
     g.rank = rank(g.sessions[1].state)
   end
   -- Repos with something needing you first, then by name.
@@ -287,88 +400,118 @@ local function render(sessions, touched, pr_by_path, changed, repos)
   local highlights = {} -- { line (0-indexed), col_start, col_end, hl_group }
   rows = {}
 
+  -- One session and its changed worktrees. Under a section, the repo
+  -- name is shown after the title, since the header no longer says it.
+  local function add_session(session, show_repo)
+    local _, repo_name, root = repo_group(repos, session.cwd or "")
+    local indent = "  "
+    local glyph = STATE_GLYPH[session.state] or "  "
+    local title = session.title ~= "" and session.title or session.session_id
+    local elapsed = format_elapsed(session.since)
+    local line = indent .. glyph .. title
+    local repo_start, repo_end
+    if show_repo then
+      repo_start = #line + 2
+      line = line .. "  " .. repo_name
+      repo_end = #line
+    end
+    if elapsed ~= "" then
+      line = line .. "  " .. elapsed
+    end
+    -- Worktrees that no longer exist (e.g. removed by cleanup) are
+    -- dropped right away, not after claude-status's 14-day expiry. Of the
+    -- rest, only ones with something to review are shown: changes (see
+    -- data.has_changes) or pending notes. `changed` is nil until the
+    -- first change check finishes; until then only noted ones show, so
+    -- changed repos pop in rather than unchanged ones flashing away.
+    local t = by_session[session.session_id]
+    local all_paths, paths = {}, {}
+    if t then
+      for p, _ in pairs(t.paths) do
+        if vim.fn.isdirectory(p) == 1 then
+          all_paths[#all_paths + 1] = p
+          if (changed and changed[p]) or annotate.pending_for(session.session_id, p) > 0 then
+            paths[#paths + 1] = p
+          end
+        end
+      end
+      table.sort(all_paths)
+      table.sort(paths)
+    end
+
+    lines[#lines + 1] = line
+    -- Cleanup gets every existing worktree, including hidden ones: a
+    -- merged, clean worktree has "no changes" and is exactly what
+    -- cleanup should remove.
+    rows[#lines] = {
+      kind = "session",
+      session_id = session.session_id,
+      paths = all_paths,
+      root = root,
+      cwd = session.cwd,
+      gone = session.cwd ~= nil and session.cwd ~= "" and vim.fn.isdirectory(session.cwd) == 0,
+      pane = session.tmux_pane,
+    }
+
+    local glyph_hl = STATE_HL[session.state]
+    if glyph_hl then
+      highlights[#highlights + 1] = { #lines - 1, #indent, #indent + #glyph, glyph_hl }
+    end
+    if repo_start then
+      highlights[#highlights + 1] = { #lines - 1, repo_start, repo_end, "AtlasHint" }
+    end
+    if elapsed ~= "" then
+      highlights[#highlights + 1] = { #lines - 1, #line - #elapsed, #line, "Comment" }
+    end
+
+    for _, path in ipairs(paths) do
+      local wline = "      " .. vim.fn.fnamemodify(path, ":t")
+      local pr = pr_by_path[path]
+      if pr then
+        local check_glyph = CHECK_GLYPH[pr.checks] or "•"
+        local badge_start = #wline
+        wline = wline .. string.format("  #%d %s", pr.number, check_glyph)
+        highlights[#highlights + 1] = { #lines, badge_start, #wline, CHECK_HL[pr.checks] or "AtlasCheckNone" }
+      end
+      local note_count = annotate.pending_for(session.session_id, path)
+      if note_count > 0 then
+        local note_start = #wline
+        wline = wline .. string.format("  [%d note%s]", note_count, note_count == 1 and "" or "s")
+        highlights[#highlights + 1] = { #lines, note_start, #wline, "AtlasNoteBadge" }
+      end
+      lines[#lines + 1] = wline
+      rows[#lines] = { kind = "worktree", session_id = session.session_id, path = path, root = root }
+    end
+  end
+
+  -- The user's sections first, in their order, even when empty.
+  for _, name in ipairs(sec.sections) do
+    local sline = "▾ " .. name
+    lines[#lines + 1] = sline
+    rows[#lines] = { kind = "section", name = name }
+    highlights[#highlights + 1] = { #lines - 1, 0, #sline, "AtlasSection" }
+    if #in_section[name] == 0 then
+      lines[#lines + 1] = "  (empty: m on a session moves it here)"
+      highlights[#highlights + 1] = { #lines - 1, 0, #lines[#lines], "AtlasHint" }
+    end
+    for _, session in ipairs(in_section[name]) do
+      add_session(session, true)
+    end
+  end
+
   if #sessions == 0 then
     lines[#lines + 1] = "(no live Claude Code sessions)"
   end
 
+  -- Then everything not in a section, grouped by repo.
   for _, key in ipairs(order) do
     local g = groups[key]
     local rline = "▾ " .. g.name
     lines[#lines + 1] = rline
     rows[#lines] = { kind = "repo", root = g.root, name = g.name }
     highlights[#highlights + 1] = { #lines - 1, 0, #rline, "AtlasRepo" }
-
     for _, session in ipairs(g.sessions) do
-      local indent = "  "
-      local glyph = STATE_GLYPH[session.state] or "  "
-      local title = session.title ~= "" and session.title or session.session_id
-      local elapsed = format_elapsed(session.since)
-      local line = indent .. glyph .. title
-      if elapsed ~= "" then
-        line = line .. "  " .. elapsed
-      end
-      -- Worktrees that no longer exist (e.g. removed by cleanup) are
-      -- dropped right away, not after claude-status's 14-day expiry.
-      -- Of the rest, only ones with something to review are shown:
-      -- changes (see data.has_changes) or pending notes. `changed` is nil
-      -- until the first change check finishes; until then only noted ones
-      -- show, so changed repos pop in rather than unchanged ones flashing
-      -- away.
-      local t = by_session[session.session_id]
-      local all_paths, paths = {}, {}
-      if t then
-        for p, _ in pairs(t.paths) do
-          if vim.fn.isdirectory(p) == 1 then
-            all_paths[#all_paths + 1] = p
-            if (changed and changed[p]) or annotate.pending_for(session.session_id, p) > 0 then
-              paths[#paths + 1] = p
-            end
-          end
-        end
-        table.sort(all_paths)
-        table.sort(paths)
-      end
-
-      lines[#lines + 1] = line
-      -- Cleanup gets every existing worktree, including hidden ones: a
-      -- merged, clean worktree has "no changes" and is exactly what
-      -- cleanup should remove.
-      rows[#lines] = {
-        kind = "session",
-        session_id = session.session_id,
-        paths = all_paths,
-        root = g.root,
-        cwd = session.cwd,
-        gone = session.cwd ~= nil and session.cwd ~= "" and vim.fn.isdirectory(session.cwd) == 0,
-        pane = session.tmux_pane,
-      }
-
-      local glyph_hl = STATE_HL[session.state]
-      if glyph_hl then
-        highlights[#highlights + 1] = { #lines - 1, #indent, #indent + #glyph, glyph_hl }
-      end
-      if elapsed ~= "" then
-        highlights[#highlights + 1] = { #lines - 1, #line - #elapsed, #line, "Comment" }
-      end
-
-      for _, path in ipairs(paths) do
-        local wline = "      " .. vim.fn.fnamemodify(path, ":t")
-        local pr = pr_by_path[path]
-        if pr then
-          local check_glyph = CHECK_GLYPH[pr.checks] or "•"
-          local badge_start = #wline
-          wline = wline .. string.format("  #%d %s", pr.number, check_glyph)
-          highlights[#highlights + 1] = { #lines, badge_start, #wline, CHECK_HL[pr.checks] or "AtlasCheckNone" }
-        end
-        local note_count = annotate.pending_for(session.session_id, path)
-        if note_count > 0 then
-          local note_start = #wline
-          wline = wline .. string.format("  [%d note%s]", note_count, note_count == 1 and "" or "s")
-          highlights[#highlights + 1] = { #lines, note_start, #wline, "AtlasNoteBadge" }
-        end
-        lines[#lines + 1] = wline
-        rows[#lines] = { kind = "worktree", session_id = session.session_id, path = path, root = g.root }
-      end
+      add_session(session, false)
     end
   end
 

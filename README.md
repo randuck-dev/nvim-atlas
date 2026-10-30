@@ -29,7 +29,16 @@ In the sidebar, the top bar shows the keys for the row under the cursor;
 | `y`    |                                          | copy its pending notes               |
 | `r`    | refresh now (including PR/CI)            | same                                 |
 | `q`    | close the sidebar                        | same                                 |
+| `m`    | move it into a section (or a new one)    |                                      |
+| `S`    | new section                              | same                                 |
 | `?`    | show/hide all keys                       | same                                 |
+
+Sections are your own groupings ("to deploy", "observability", ...):
+`S` makes one, `m` on a session moves it in (or out), and on a section
+row `R` renames it and `d` deletes it (its sessions go back under their
+repo). Sections show first, in the order you made them, each session
+with its repo name; everything else stays grouped by repo. Saved in
+Neovim's state folder, so they survive restarts.
 
 While reviewing a diff, `<leader>aa` adds a note on the current line, or
 on the selected lines in visual mode. Notes show inline in the diff.
