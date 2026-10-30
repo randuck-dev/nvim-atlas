@@ -58,7 +58,8 @@ diagnostics (hint severity, ✎ in the gutter) in a virtual line below the
 line they're on; `]d`/`[d` and diagnostic lists include them. That display
 applies to atlas's own diagnostic namespace only, not your LSP diagnostics.
 
-In the session view: `i` to type into the session, `<C-q>` (from typing
+Enter on a session opens it ready to type (Enter again jumps back into the
+running view). In the session view: `i` to type again, `<C-q>` (from typing
 or normal mode) back to the session's row in the sidebar, with the view
 still running, and `q` in normal mode to close it. Change the key with
 `setup({ keys = { leave_view = "<C-q>" } })`. It's a real tmux client on a temporary

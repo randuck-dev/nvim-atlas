@@ -120,6 +120,41 @@ describe("atlas.peek (real tmux client on a grouped view session)", function()
     assert.is_truthy(peek._current_view(), "the view should stay open")
   end)
 
+  it("opens straight into terminal mode, and Enter on the same session jumps back in", function()
+    local main_win = open_sidebar_and_main_window()
+    local name, pane = new_session()
+    table.insert(to_kill, name)
+    mock_sessions({ { session_id = "s1", tmux_pane = pane, state = "done" } })
+
+    -- Headless, a pending :startinsert never gets processed inside a
+    -- test, so record the request instead of checking the mode.
+    local real_cmd = vim.cmd
+    local inserts = 0
+    vim.cmd = setmetatable({}, {
+      __index = real_cmd,
+      __call = function(_, c)
+        if c == "startinsert" then
+          inserts = inserts + 1
+          return
+        end
+        return real_cmd(c)
+      end,
+    })
+
+    peek.open("s1")
+    local first = inserts
+    local view = peek._current_view()
+    real_cmd("wincmd h") -- back in the sidebar
+    peek.open("s1")
+    local current_win = vim.api.nvim_get_current_win()
+    vim.cmd = real_cmd
+
+    assert.are.equal(1, first, "terminal mode right after opening")
+    assert.are.equal(2, inserts, "terminal mode after jumping back in")
+    assert.are.equal(main_win, current_win)
+    assert.are.equal(view, peek._current_view(), "should reuse the running view, not restart it")
+  end)
+
   it("shows new output live", function()
     local main_win = open_sidebar_and_main_window()
     local name, pane = new_session()

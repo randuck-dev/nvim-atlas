@@ -144,7 +144,7 @@ end
 
 --- Opens a real interactive terminal onto session_id's tmux pane in the
 --- window next to the sidebar (or a new vsplit if the sidebar is the
---- only window). `i` to type into it, <C-q> (configurable) to go
+--- only window), already in terminal mode for typing; `i` to type again, <C-q> (configurable) to go
 --- back to the sidebar, `q` in normal mode to close it. No-ops (with a warning)
 --- if the session isn't live or has no recorded tmux pane.
 function M.open(session_id)
@@ -168,6 +168,16 @@ function M.open(session_id)
     if not pane or pane == "" then
       vim.notify("atlas: no tmux pane recorded for this session", vim.log.levels.WARN)
       return
+    end
+
+    -- Same session already showing: jump back into it, typing.
+    if current and current.session_id == session_id and vim.api.nvim_buf_is_valid(current.buf) then
+      local win = vim.fn.bufwinid(current.buf)
+      if win ~= -1 then
+        vim.api.nvim_set_current_win(win)
+        vim.cmd("startinsert")
+        return
+      end
     end
 
     stop_current()
@@ -209,7 +219,9 @@ function M.open(session_id)
       return
     end
 
-    current = { buf = buf, job = job, view = view }
+    current = { buf = buf, job = job, view = view, session_id = session_id }
+    -- Straight into terminal mode: no `A`/`i` needed to start typing.
+    vim.cmd("startinsert")
 
     vim.keymap.set("n", "q", stop_current, { buffer = buf, nowait = true, desc = "atlas: close session view" })
     vim.keymap.set({ "t", "n" }, leave_key, function()
