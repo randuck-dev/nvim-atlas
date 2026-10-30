@@ -106,11 +106,10 @@ describe("atlas.review + annotate (real git, real diffview)", function()
     assert.are.equal(wt, notes[1].worktree)
     assert.are.equal(2, notes[1].line_start)
 
-    local ns = vim.api.nvim_create_namespace("atlas_annotations")
-    local marks = vim.api.nvim_buf_get_extmarks(vim.api.nvim_win_get_buf(win), ns, 0, -1, { details = true })
-    assert.are.equal(1, #marks)
-    assert.are.equal(1, marks[1][2]) -- row 1 = line 2
-    assert.truthy(marks[1][4].virt_text[1][1]:find("why uppercase?", 1, true))
+    local d = vim.diagnostic.get(vim.api.nvim_win_get_buf(win), { namespace = annotate.ns })
+    assert.are.equal(1, #d)
+    assert.are.equal(1, d[1].lnum) -- line 2
+    assert.truthy(d[1].message:find("why uppercase?", 1, true))
 
     vim.fn.delete(vim.fn.stdpath("state") .. "/nvim-atlas/annotations/" .. sid .. ".json")
   end)

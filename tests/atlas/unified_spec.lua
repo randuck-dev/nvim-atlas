@@ -164,11 +164,10 @@ describe("atlas.unified review (real git)", function()
     assert.are.equal(2, notes[1].line_start)
     assert.are.equal(wt, notes[1].worktree)
 
-    local nns = vim.api.nvim_create_namespace("atlas_annotations")
-    local marks = vim.api.nvim_buf_get_extmarks(buf, nns, 0, -1, { details = true })
-    assert.are.equal(1, #marks)
-    assert.are.equal(l - 1, marks[1][2])
-    assert.truthy(marks[1][4].virt_text[1][1]:find("why uppercase?", 1, true))
+    local d = vim.diagnostic.get(buf, { namespace = annotate.ns })
+    assert.are.equal(1, #d)
+    assert.are.equal(l - 1, d[1].lnum)
+    assert.truthy(d[1].message:find("why uppercase?", 1, true))
 
   end)
 
@@ -183,6 +182,10 @@ describe("atlas.unified review (real git)", function()
     assert.are.equal("f.txt", notes[1].file)
     assert.are.equal(2, notes[1].line_start)
     assert.are.equal(6, notes[1].line_end)
+    -- shown once, under the first row of the range
+    local d = vim.diagnostic.get(buf, { namespace = annotate.ns })
+    assert.are.equal(1, #d)
+    assert.are.equal(line_of(buf, "+TWO") - 1, d[1].lnum)
   end)
 
   local function panel()

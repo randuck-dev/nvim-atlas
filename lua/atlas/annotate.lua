@@ -6,14 +6,43 @@ local review = require("atlas.review")
 
 local M = {}
 
+-- Notes are shown as diagnostics in their own namespace, displayed as
+-- virtual lines under the line they're on (plus a gutter sign). That
+-- display is configured for this namespace only, so it doesn't touch
+-- how LSP diagnostics look; ]d/[d and diagnostic lists see notes too.
 local ns = vim.api.nvim_create_namespace("atlas_annotations")
-local hl_done = false
-local function ensure_hl()
-  if hl_done then
+M.ns = ns
+local configured = false
+local function ensure_config()
+  if configured then
     return
   end
-  hl_done = true
-  vim.api.nvim_set_hl(0, "AtlasNoteInline", { fg = "#ebbcba", italic = true, default = true }) -- rose
+  configured = true
+  vim.diagnostic.config({
+    virtual_lines = true,
+    virtual_text = false,
+    underline = false,
+    signs = { text = { [vim.diagnostic.severity.HINT] = "✎" } },
+    update_in_insert = false,
+  }, ns)
+end
+
+--- Shows notes in `bufnr` as diagnostics below their lines.
+--- `items` = { { lnum (0-indexed), end_lnum (0-indexed), text } }.
+function M.show(bufnr, items)
+  ensure_config()
+  local diags = {}
+  for _, it in ipairs(items) do
+    diags[#diags + 1] = {
+      lnum = it[1],
+      end_lnum = it[2],
+      col = 0,
+      severity = vim.diagnostic.severity.HINT,
+      source = "atlas",
+      message = "note: " .. it[3],
+    }
+  end
+  vim.diagnostic.set(ns, bufnr == 0 and vim.api.nvim_get_current_buf() or bufnr, diags)
 end
 
 local function annotations_path(session_id)
@@ -83,32 +112,23 @@ local function current_file()
   return entry and entry.path or nil
 end
 
---- Draws session_id's pending notes on worktree_path/file as virtual
---- text at end-of-line in bufnr (0 = current), replacing whatever was
---- there before. Multi-line notes are marked on every line they cover,
---- not just the first.
+--- Shows session_id's pending notes on worktree_path/file in bufnr
+--- (0 = current) as diagnostics below their first line, replacing what
+--- was shown before. One per note, however many lines it covers.
 function M.render_inline(bufnr, session_id, worktree_path, file)
-  bufnr = bufnr or 0
-  ensure_hl()
-  vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-
-  local notes = vim.tbl_filter(function(a)
-    return a.worktree == worktree_path and a.file == file
-  end, M.load(session_id))
-
+  bufnr = (bufnr == nil or bufnr == 0) and vim.api.nvim_get_current_buf() or bufnr
   local line_count = vim.api.nvim_buf_line_count(bufnr)
-  for _, n in ipairs(notes) do
-    local l1, l2 = n.line_start or 1, n.line_end or n.line_start or 1
-    for line = l1, l2 do
-      local row = line - 1
-      if row >= 0 and row < line_count then
-        vim.api.nvim_buf_set_extmark(bufnr, ns, row, 0, {
-          virt_text = { { "  « " .. n.text .. " »", "AtlasNoteInline" } },
-          virt_text_pos = "eol",
-        })
+  local items = {}
+  for _, n in ipairs(M.load(session_id)) do
+    if n.worktree == worktree_path and n.file == file then
+      local l1 = math.min((n.line_start or 1) - 1, line_count - 1)
+      local l2 = math.min((n.line_end or n.line_start or 1) - 1, line_count - 1)
+      if l1 >= 0 then
+        items[#items + 1] = { l1, l2, n.text }
       end
     end
   end
+  M.show(bufnr, items)
 end
 
 --- Re-renders inline notes for whatever file is current in the

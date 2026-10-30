@@ -29,7 +29,6 @@ local function hl()
   vim.api.nvim_set_hl(0, "AtlasStatusA", { fg = "#9ccfd8", default = true }) -- foam
   vim.api.nvim_set_hl(0, "AtlasStatusD", { fg = "#eb6f92", default = true }) -- love
   vim.api.nvim_set_hl(0, "AtlasStatusR", { fg = "#c4a7e7", bold = true, default = true }) -- iris
-  vim.api.nvim_set_hl(0, "AtlasNoteInline", { fg = "#ebbcba", italic = true, default = true })
 end
 
 --- Parses `git diff` output into display lines plus a per-line map.
@@ -327,33 +326,39 @@ function M.resolve(buf, line1, line2)
   return file, first, last
 end
 
---- Draws pending notes at the end of the rows they're on.
+--- Shows pending notes as diagnostics below the first row each covers.
 function M.render_notes(buf)
   buf = buf == 0 and vim.api.nvim_get_current_buf() or buf
   local view = views[buf]
   if not view then
     return
   end
-  local notes_ns = vim.api.nvim_create_namespace("atlas_annotations")
-  vim.api.nvim_buf_clear_namespace(buf, notes_ns, 0, -1)
-  local notes = require("atlas.annotate").load(view.session_id)
-  for _, n in ipairs(notes) do
+  local annotate = require("atlas.annotate")
+  local last = 0
+  for l in pairs(view.rows) do
+    last = math.max(last, l)
+  end
+  local items = {}
+  for _, n in ipairs(annotate.load(view.session_id)) do
     if n.worktree == view.path then
-      for l, row in pairs(view.rows) do
-        -- Not on removed rows: their `new` is the position they were
-        -- removed at, shared with the row that replaced them, so a note
-        -- would show twice. A note made on a removed line shows on the
-        -- line that took its place.
-        if row.file == n.file and row.new and (row.kind == "add" or row.kind == "ctx")
+      -- First and last buffer rows of the file's lines in the note's
+      -- range. Not removed rows: their position is shared with the row
+      -- that replaced them.
+      local first, final
+      for l = 1, last do
+        local row = view.rows[l]
+        if row and row.file == n.file and row.new and (row.kind == "add" or row.kind == "ctx")
           and row.new >= n.line_start and row.new <= n.line_end then
-          vim.api.nvim_buf_set_extmark(buf, notes_ns, l - 1, 0, {
-            virt_text = { { "  « " .. n.text .. " »", "AtlasNoteInline" } },
-            virt_text_pos = "eol",
-          })
+          first = first or l
+          final = l
         end
+      end
+      if first then
+        items[#items + 1] = { first - 1, final - 1, n.text }
       end
     end
   end
+  annotate.show(buf, items)
 end
 
 local function jump(buf, kind, dir)

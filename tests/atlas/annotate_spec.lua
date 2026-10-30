@@ -75,7 +75,11 @@ describe("atlas.annotate storage", function()
     assert.are.equal(1, annotate.pending_for(sid, "/tmp/repo-b"))
   end)
 
-  it("renders a single-line note as virtual text on its line", function()
+  local function notes_in(buf)
+    return vim.diagnostic.get(buf, { namespace = annotate.ns })
+  end
+
+  it("shows a note as a diagnostic below its line", function()
     local sid = fresh_session_id()
     annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 3, line_end = 3, text = "hello" })
 
@@ -84,17 +88,20 @@ describe("atlas.annotate storage", function()
 
     annotate.render_inline(buf, sid, "/tmp/repo-a", "f.lua")
 
-    local ns = vim.api.nvim_create_namespace("atlas_annotations")
-    local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
-    assert.are.equal(1, #marks)
-    assert.are.equal(2, marks[1][2]) -- row 2 = line 3, 0-indexed
-    local virt_text = marks[1][4].virt_text[1][1]
-    assert.truthy(virt_text:find("hello", 1, true))
+    local d = notes_in(buf)
+    assert.are.equal(1, #d)
+    assert.are.equal(2, d[1].lnum) -- line 3, 0-indexed
+    assert.are.equal(vim.diagnostic.severity.HINT, d[1].severity)
+    assert.are.equal("note: hello", d[1].message)
+    -- Displayed as a virtual line under it, for this namespace only.
+    local cfg = vim.diagnostic.config(nil, annotate.ns)
+    assert.truthy(cfg.virtual_lines)
+    assert.falsy(cfg.virtual_text)
 
     vim.api.nvim_buf_delete(buf, { force = true })
   end)
 
-  it("renders a multi-line note on every line it covers", function()
+  it("shows a multi-line note once, spanning its lines", function()
     local sid = fresh_session_id()
     annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 2, line_end = 4, text = "block note" })
 
@@ -103,14 +110,15 @@ describe("atlas.annotate storage", function()
 
     annotate.render_inline(buf, sid, "/tmp/repo-a", "f.lua")
 
-    local ns = vim.api.nvim_create_namespace("atlas_annotations")
-    local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {})
-    assert.are.equal(3, #marks) -- lines 2, 3, 4
+    local d = notes_in(buf)
+    assert.are.equal(1, #d)
+    assert.are.equal(1, d[1].lnum)
+    assert.are.equal(3, d[1].end_lnum)
 
     vim.api.nvim_buf_delete(buf, { force = true })
   end)
 
-  it("clears previous markers before rendering (no stale notes from an earlier call)", function()
+  it("clears previous notes before showing (no stale notes from an earlier call)", function()
     local sid = fresh_session_id()
     annotate.record(sid, { worktree = "/tmp/repo-a", file = "f.lua", line_start = 1, line_end = 1, text = "first" })
 
@@ -122,10 +130,17 @@ describe("atlas.annotate storage", function()
     annotate.clear_for(sid, "/tmp/repo-a")
     annotate.render_inline(buf, sid, "/tmp/repo-a", "f.lua")
 
-    local ns = vim.api.nvim_create_namespace("atlas_annotations")
-    local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {})
-    assert.are.equal(0, #marks)
+    assert.are.equal(0, #notes_in(buf))
 
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it("doesn't change how other (e.g. LSP) diagnostics are displayed", function()
+    local before = vim.deepcopy(vim.diagnostic.config())
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one" })
+    annotate.show(buf, { { 0, 0, "x" } })
+    assert.are.same(before, vim.diagnostic.config())
     vim.api.nvim_buf_delete(buf, { force = true })
   end)
 end)

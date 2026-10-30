@@ -51,7 +51,10 @@ previous file, `⏎` opens the file at that line in a split, `r` reloads,
 `q` closes.
 
 While reviewing (unified or side by side), `<leader>aa` adds a note on the
-current line, or on the selected lines in visual mode. Notes show inline.
+current line, or on the selected lines in visual mode. Notes show as
+diagnostics (hint severity, ✎ in the gutter) in a virtual line below the
+line they're on; `]d`/`[d` and diagnostic lists include them. That display
+applies to atlas's own diagnostic namespace only, not your LSP diagnostics.
 
 In the session view: `i` to type into the session, `<C-\><C-n>` back to
 normal mode, `q` to close it. It's a real tmux client on a temporary
