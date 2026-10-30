@@ -116,7 +116,8 @@ local function summary(items)
 end
 
 --- Closes the tmux pane a session runs in, so its worktree can go.
-local function close_pane(pane)
+--- Refuses anything that isn't a real "%N" pane id. Returns ok, err.
+function M.close_pane(pane)
   if not require("atlas.deliver").is_pane_id(pane) then
     return false, "no valid tmux pane for the session"
   end
@@ -182,7 +183,7 @@ function M.run(paths, cb, opts)
       for _, it in ipairs(safe) do
         local ok, err = true, nil
         if it.own then
-          ok, err = close_pane(it.pane)
+          ok, err = M.close_pane(it.pane)
           if ok then
             -- Give the shell/claude a moment to exit before git checks the tree.
             vim.wait(300)

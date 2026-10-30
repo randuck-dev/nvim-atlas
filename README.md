@@ -17,7 +17,8 @@ session changed, with PR/CI status and pending notes. Worktrees a
 session only touched without changing are hidden. It refreshes itself
 while open.
 
-In the sidebar:
+In the sidebar, the top bar shows the keys for the row under the cursor;
+`?` shows the full list at the bottom.
 
 | Key    | On a session row                         | On a worktree row                    |
 |--------|------------------------------------------|--------------------------------------|
@@ -28,6 +29,7 @@ In the sidebar:
 | `y`    |                                          | copy its pending notes               |
 | `r`    | refresh now (including PR/CI)            | same                                 |
 | `q`    | close the sidebar                        | same                                 |
+| `?`    | show/hide all keys                       | same                                 |
 
 While reviewing a diff, `<leader>aa` adds a note on the current line, or
 on the selected lines in visual mode. Notes show inline in the diff.
@@ -41,6 +43,10 @@ the shared tmux window resizes to fit the Neovim window.
 (`wt switch -c`, falling back to `git worktree add`) and opens a tmux
 window named after the branch running `claude`, in the background. The
 new session shows up under its repo once Claude starts.
+
+A session whose folder was removed (e.g. with `wt remove` while Claude
+kept running) shows as `(folder removed)`; `X` on it closes the leftover
+session.
 
 Cleanup also offers the session's own worktree (e.g. one made with
 `n`); confirming closes that session's tmux pane first. It only removes linked worktrees whose PR is merged or whose branch

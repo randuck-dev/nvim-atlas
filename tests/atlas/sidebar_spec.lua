@@ -242,6 +242,101 @@ describe("atlas.sidebar", function()
     assert.are.equal("/work/alpha", asked_root)
   end)
 
+  it("shows the keys for the row under the cursor in the top bar", function()
+    -- cwd must exist: a session whose folder is gone gets different keys.
+    state.sessions = { { session_id = "s1", state = "done", title = "alpha work", cwd = "/tmp/atlas-sb/repo-a", since = os.time() } }
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("repo-a", 1, true) ~= nil
+    end))
+    local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+    vim.api.nvim_set_current_win(win)
+
+    local function bar_at(line)
+      vim.api.nvim_win_set_cursor(win, { line, 0 })
+      vim.api.nvim_exec_autocmds("CursorMoved", { buffer = vim.api.nvim_win_get_buf(win) })
+      return vim.wo[win].winbar
+    end
+
+    local repo_bar, session_bar, worktree_bar = bar_at(1), bar_at(2), bar_at(3)
+    assert.truthy(repo_bar:find("new worktree", 1, true))
+    assert.falsy(repo_bar:find("send", 1, true))
+    assert.truthy(session_bar:find("send", 1, true))
+    assert.truthy(session_bar:find("clean up", 1, true))
+    assert.truthy(worktree_bar:find("diff", 1, true))
+    assert.truthy(worktree_bar:find("copy notes", 1, true))
+    for _, bar in ipairs({ repo_bar, session_bar, worktree_bar }) do
+      assert.truthy(bar:find("all keys", 1, true), "every row should point at ? for the full list")
+    end
+  end)
+
+  it("? shows and hides the full key list, aligned", function()
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("first session", 1, true) ~= nil
+    end))
+    assert.falsy(sidebar_text():find("clean up finished worktrees", 1, true))
+
+    local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_feedkeys("?", "x", false)
+    local text = sidebar_text()
+    assert.truthy(text:find("clean up finished worktrees", 1, true))
+    assert.truthy(text:find("<leader>aa", 1, true))
+    assert.truthy(vim.wo[win].winbar:find("hide keys", 1, true))
+
+    -- Descriptions line up even though "⏎" is several bytes wide.
+    local cols = {}
+    for _, l in ipairs(vim.split(text, "\n")) do
+      local _, desc = l:match("^  (%S+)%s+(.+)$")
+      if desc and (desc:find("worktrees", 1, true) or desc:find("live view", 1, true) or desc:find("close sidebar", 1, true)) then
+        cols[#cols + 1] = vim.fn.strdisplaywidth(l) - vim.fn.strdisplaywidth(desc)
+      end
+    end
+    assert.are.equal(3, #cols)
+    assert.are.equal(cols[1], cols[2])
+    assert.are.equal(cols[2], cols[3])
+
+    vim.api.nvim_feedkeys("?", "x", false)
+    assert.falsy(sidebar_text():find("clean up finished worktrees", 1, true))
+  end)
+
+  it("marks a session whose folder was removed and offers to close it with X", function()
+    state.sessions = {
+      { session_id = "g", state = "done", title = "orphaned", cwd = "/tmp/atlas-sb/removed-wt", tmux_pane = "%999", since = os.time() },
+    }
+    state.touched = {}
+    local cleanup = require("atlas.cleanup")
+    local real_close, real_select = cleanup.close_pane, vim.ui.select
+    local closed
+    cleanup.close_pane = function(pane)
+      closed = pane
+      return true
+    end
+    vim.ui.select = function(choices, _, on_choice)
+      on_choice(choices[1])
+    end
+
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("orphaned", 1, true) ~= nil
+    end))
+    assert.truthy(sidebar_text():find("removed-wt (folder removed)", 1, true))
+
+    local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 2, 0 })
+    vim.api.nvim_exec_autocmds("CursorMoved", { buffer = vim.api.nvim_win_get_buf(win) })
+    assert.truthy(vim.wo[win].winbar:find("close session", 1, true))
+
+    vim.api.nvim_feedkeys("X", "x", false)
+    cleanup.close_pane, vim.ui.select = real_close, real_select
+    assert.are.equal("%999", closed)
+  end)
+
   it("hides worktrees that no longer exist on disk", function()
     state.touched[1].paths["/tmp/atlas-sb/gone"] = os.time()
     sidebar.toggle()

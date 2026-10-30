@@ -16,7 +16,8 @@ local peek = require("atlas.peek")
 local M = {}
 
 local buf = nil
-local rows = {} -- line (1-indexed) -> { kind = "session"|"worktree", session_id, path }
+local rows = {} -- line (1-indexed) -> { kind = "repo"|"session"|"worktree", ... }
+local show_help = false -- full key list shown at the bottom (`?`)
 local ns = vim.api.nvim_create_namespace("atlas_sidebar")
 
 local config = {
@@ -51,6 +52,8 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AtlasCheckNone", { fg = "#6e6a86", default = true })
   vim.api.nvim_set_hl(0, "AtlasNoteBadge", { fg = "#ebbcba", default = true }) -- rose
   vim.api.nvim_set_hl(0, "AtlasRepo", { fg = "#9ccfd8", bold = true, default = true }) -- foam
+  vim.api.nvim_set_hl(0, "AtlasKey", { fg = "#f6c177", bold = true, default = true }) -- gold
+  vim.api.nvim_set_hl(0, "AtlasHint", { fg = "#6e6a86", default = true }) -- muted
 end
 
 local function format_elapsed(epoch)
@@ -103,7 +106,25 @@ local function ensure_buf()
 
   map("X", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
-    if row and row.kind == "session" then
+    if row and row.kind == "session" and row.gone then
+      -- Its folder was removed (e.g. `wt remove`) while Claude kept
+      -- running in it: all that's left to clean up is the session.
+      vim.ui.select({ "Close the session", "Cancel" }, {
+        prompt = "atlas: this session's folder was removed. Close the session?",
+      }, function(choice)
+        if choice ~= "Close the session" then
+          return
+        end
+        local ok, err = require("atlas.cleanup").close_pane(row.pane)
+        if not ok then
+          vim.notify("atlas: " .. err, vim.log.levels.ERROR)
+          return
+        end
+        vim.defer_fn(function()
+          M.refresh(false)
+        end, 500)
+      end)
+    elseif row and row.kind == "session" then
       require("atlas.cleanup").run(row.paths, function(removed)
         if removed > 0 then
           M.refresh(true)
@@ -147,7 +168,71 @@ local function ensure_buf()
     vim.cmd("close")
   end, "atlas: close sidebar")
 
+  map("?", function()
+    show_help = not show_help
+    M.redraw()
+  end, "atlas: show/hide all keys")
+
+  -- The legend in the top bar follows the row under the cursor.
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    buffer = buf,
+    callback = function()
+      M.update_legend()
+    end,
+  })
+
   return buf
+end
+
+-- Key legend. The top bar (winbar, which stays visible however long the
+-- list gets -- LazyVim's statusline is global, so a per-window one
+-- wouldn't show) lists the keys for the row under the cursor; `?` adds
+-- the full list at the bottom.
+local HINTS = {
+  repo = { { "n", "new worktree" } },
+  session = { { "⏎", "open" }, { "s", "send" }, { "X", "clean up" }, { "n", "new" } },
+  worktree = { { "⏎", "diff" }, { "y", "copy notes" } },
+  -- A session whose folder was removed: closing it is the useful action.
+  session_gone = { { "⏎", "open" }, { "X", "close session" } },
+}
+
+local HELP = {
+  { "⏎", "session: open live view" },
+  { "", "worktree: review diff" },
+  { "n", "new worktree + session" },
+  { "s", "send notes to session" },
+  { "X", "clean up finished worktrees" },
+  { "y", "copy a worktree's notes" },
+  { "r", "refresh now (incl. PR/CI)" },
+  { "q", "close sidebar" },
+  { "?", "hide this list" },
+}
+local HELP_FOOTER = "in a diff: <leader>aa adds a note"
+
+--- The winbar string for a row kind ("repo"/"session"/"worktree"/nil).
+function M.legend_for(kind)
+  local parts = {}
+  for _, h in ipairs(HINTS[kind] or {}) do
+    parts[#parts + 1] = "%#AtlasKey#" .. h[1] .. "%#AtlasHint# " .. h[2]
+  end
+  parts[#parts + 1] = "%#AtlasKey#?%#AtlasHint# " .. (show_help and "hide keys" or "all keys")
+  return "%#AtlasHint#" .. table.concat(parts, "  ")
+end
+
+function M.update_legend()
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  local win = vim.fn.bufwinid(buf)
+  if win == -1 then
+    return
+  end
+  local row = rows[vim.api.nvim_win_get_cursor(win)[1]]
+  local kind = row and row.kind
+  if kind == "session" and row.gone then
+    kind = "session_gone"
+  end
+  vim.wo[win].winbar = M.legend_for(kind)
 end
 
 -- Display name and grouping key for a session's repo. `repos` maps a
@@ -158,7 +243,8 @@ local function repo_group(repos, cwd)
   if r then
     return r.root, r.name, r.root
   end
-  return "dir:" .. cwd, vim.fn.fnamemodify(cwd, ":t") .. " (not a repo)", nil
+  local label = vim.fn.isdirectory(cwd) == 1 and " (not a repo)" or " (folder removed)"
+  return "dir:" .. cwd, vim.fn.fnamemodify(cwd, ":t") .. label, nil
 end
 
 local STATE_ORDER = { input = 1, done = 2, working = 3 }
@@ -253,6 +339,7 @@ local function render(sessions, touched, pr_by_path, changed, repos)
         paths = all_paths,
         root = g.root,
         cwd = session.cwd,
+        gone = session.cwd ~= nil and session.cwd ~= "" and vim.fn.isdirectory(session.cwd) == 0,
         pane = session.tmux_pane,
       }
 
@@ -285,6 +372,19 @@ local function render(sessions, touched, pr_by_path, changed, repos)
     end
   end
 
+  if show_help then
+    lines[#lines + 1] = ""
+    for _, h in ipairs(HELP) do
+      -- Pad by display width, not bytes: "⏎" is 3 bytes but 1 column.
+      local key = "  " .. h[1] .. string.rep(" ", 2 - vim.fn.strdisplaywidth(h[1]))
+      lines[#lines + 1] = key .. "  " .. h[2]
+      highlights[#highlights + 1] = { #lines - 1, 0, #key, "AtlasKey" }
+      highlights[#highlights + 1] = { #lines - 1, #key, #lines[#lines], "AtlasHint" }
+    end
+    lines[#lines + 1] = "  " .. HELP_FOOTER
+    highlights[#highlights + 1] = { #lines - 1, 0, #lines[#lines], "AtlasHint" }
+  end
+
   local b = ensure_buf()
   vim.bo[b].modifiable = true
   vim.api.nvim_buf_set_lines(b, 0, -1, false, lines)
@@ -293,6 +393,7 @@ local function render(sessions, touched, pr_by_path, changed, repos)
     vim.api.nvim_buf_set_extmark(b, ns, h[1], h[2], { end_col = h[3], hl_group = h[4] })
   end
   vim.bo[b].modifiable = false
+  M.update_legend()
 end
 
 local function is_open()
@@ -310,6 +411,12 @@ local function render_last()
   if last and is_open() then
     render(vim.deepcopy(last.sessions), last.touched, pr_cache, last.changed, repo_cache)
   end
+end
+
+--- Re-renders from what's already loaded (no new data), e.g. after `?`.
+function M.redraw()
+  render_last()
+  M.update_legend()
 end
 
 -- GitHub PR/CI status is slow (measured ~2s for 4 worktrees: a git call
@@ -446,6 +553,7 @@ function M._reset()
   stop_polling()
   in_flight, pr_in_flight, changes_in_flight = false, false, false
   repo_cache = {}
+  show_help = false
   last, pr_cache, pr_fetched_at = nil, {}, 0
 end
 
@@ -480,6 +588,7 @@ function M.toggle()
     vim.api.nvim_buf_set_lines(b, 0, -1, false, { "loading sessions…" })
     vim.bo[b].modifiable = false
   end
+  M.update_legend()
   M.refresh(true)
   start_polling()
 end
