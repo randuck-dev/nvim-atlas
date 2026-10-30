@@ -665,6 +665,44 @@ describe("atlas.sidebar", function()
     vim.fn.delete(vim.fn.fnamemodify(names_file, ":h"), "rf")
   end)
 
+  it("animates a blue spinner on working sessions, and stops when closed", function()
+    state.sessions = {
+      { session_id = "w", state = "working", title = "busy one", cwd = "/tmp/atlas-sb/repo-a", since = os.time() },
+      { session_id = "d", state = "done", title = "idle one", cwd = "/tmp/atlas-sb/repo-a", since = os.time() },
+    }
+    state.touched = {}
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("busy one", 1, true) ~= nil
+    end))
+    local b = vim.fn.bufnr("atlas://sidebar")
+    local spin_ns = vim.api.nvim_create_namespace("atlas_sidebar_spinner")
+    local function frame()
+      local marks = vim.api.nvim_buf_get_extmarks(b, spin_ns, 0, -1, { details = true })
+      assert.are.equal(1, #marks, "only the working session spins")
+      return marks[1][4].virt_text[1][1], marks[1][4].virt_text[1][2], marks[1][2]
+    end
+
+    local first, hl, row = frame()
+    local busy_row
+    for i, l in ipairs(vim.api.nvim_buf_get_lines(b, 0, -1, false)) do
+      if l:find("busy one", 1, true) then
+        busy_row = i - 1
+      end
+    end
+    assert.are.equal(busy_row, row)
+    assert.are.equal("AtlasStateWorking", hl)
+    assert.are.equal("#3e8fb0", string.format("#%06x", vim.api.nvim_get_hl(0, { name = "AtlasStateWorking" }).fg))
+
+    assert.is_true(vim.wait(1000, function()
+      return (frame()) ~= first
+    end, 20), "the spinner should advance")
+
+    sidebar.toggle() -- close
+    assert.is_false(sidebar._spinning())
+  end)
+
   it("hides worktrees that no longer exist on disk", function()
     state.touched[1].paths["/tmp/atlas-sb/gone"] = os.time()
     sidebar.toggle()

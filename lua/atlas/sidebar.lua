@@ -41,7 +41,31 @@ function M.configure(opts)
   config = vim.tbl_extend("force", config, opts)
 end
 
-local STATE_GLYPH = { input = "● ", done = "◆ ", working = "… " }
+local STATE_GLYPH = { input = "● ", done = "◆ ", working = "⠋ " }
+
+-- Working sessions get a small spinner on their state glyph: an overlay
+-- extmark advanced on a timer, so each frame touches no buffer text (the
+-- cursor and everything else stay put). Runs only while the sidebar is
+-- open and some session is working.
+local SPIN_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+local spinner_ns = vim.api.nvim_create_namespace("atlas_sidebar_spinner")
+local spinners = {} -- { { line (0-indexed), col }, ... } of working sessions
+local spin_frame = 1
+local spin_timer = nil
+
+local function draw_spinners()
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(buf, spinner_ns, 0, -1)
+  local frame = SPIN_FRAMES[spin_frame]
+  for _, sp in ipairs(spinners) do
+    pcall(vim.api.nvim_buf_set_extmark, buf, spinner_ns, sp[1], sp[2], {
+      virt_text = { { frame, "AtlasStateWorking" } },
+      virt_text_pos = "overlay",
+    })
+  end
+end
 local STATE_HL = { input = "AtlasStateInput", done = "AtlasStateDone", working = "AtlasStateWorking" }
 
 local CHECK_GLYPH = { passing = "✓", failing = "✗", pending = "…", none = "•" }
@@ -78,7 +102,7 @@ local function setup_highlights()
   -- Rosé Pine: gold, iris, muted, love, foam.
   vim.api.nvim_set_hl(0, "AtlasStateInput", { fg = "#f6c177", default = true })
   vim.api.nvim_set_hl(0, "AtlasStateDone", { fg = "#c4a7e7", default = true })
-  vim.api.nvim_set_hl(0, "AtlasStateWorking", { fg = "#6e6a86", default = true })
+  vim.api.nvim_set_hl(0, "AtlasStateWorking", { fg = "#3e8fb0", default = true }) -- blue (Rosé Pine Moon pine)
   vim.api.nvim_set_hl(0, "AtlasCheckPassing", { fg = "#9ccfd8", default = true })
   vim.api.nvim_set_hl(0, "AtlasCheckFailing", { fg = "#eb6f92", default = true })
   vim.api.nvim_set_hl(0, "AtlasCheckPending", { fg = "#f6c177", default = true })
@@ -500,6 +524,7 @@ local function render(sessions, touched, pr_by_path, changed, repos)
   local lines = {}
   local highlights = {} -- { line (0-indexed), col_start, col_end, hl_group }
   rows = {}
+  spinners = {}
 
   -- One session and its changed worktrees. Under a section, the repo
   -- name is shown after the title, since the header no longer says it.
@@ -564,6 +589,9 @@ local function render(sessions, touched, pr_by_path, changed, repos)
     local glyph_hl = STATE_HL[session.state]
     if glyph_hl then
       highlights[#highlights + 1] = { #lines - 1, #indent, #indent + #glyph, glyph_hl }
+    end
+    if session.state == "working" then
+      spinners[#spinners + 1] = { #lines - 1, #indent }
     end
     if repo_start then
       highlights[#highlights + 1] = { #lines - 1, repo_start, repo_end, "AtlasHint" }
@@ -695,6 +723,7 @@ local function render(sessions, touched, pr_by_path, changed, repos)
   local b = ensure_buf()
   vim.bo[b].modifiable = true
   vim.api.nvim_buf_set_lines(b, 0, -1, false, lines)
+  draw_spinners()
   vim.api.nvim_buf_clear_namespace(b, ns, 0, -1)
   for _, h in ipairs(highlights) do
     vim.api.nvim_buf_set_extmark(b, ns, h[1], h[2], { end_col = h[3], hl_group = h[4] })
@@ -837,10 +866,26 @@ local function stop_polling()
     timer:close()
   end
   timer = nil
+  if spin_timer and not spin_timer:is_closing() then
+    spin_timer:stop()
+    spin_timer:close()
+  end
+  spin_timer = nil
 end
 
 local function start_polling()
   stop_polling()
+  spin_timer = vim.uv.new_timer()
+  spin_timer:start(
+    100,
+    100,
+    vim.schedule_wrap(function()
+      if #spinners > 0 and is_open() then
+        spin_frame = spin_frame % #SPIN_FRAMES + 1
+        draw_spinners()
+      end
+    end)
+  )
   timer = vim.uv.new_timer()
   timer:start(
     config.poll_ms,
@@ -862,6 +907,11 @@ function M._reset()
   repo_cache = {}
   show_help = false
   last, pr_cache, pr_fetched_at = nil, {}, 0
+end
+
+--- True while the spinner timer is running (for tests).
+function M._spinning()
+  return spin_timer ~= nil and not spin_timer:is_closing()
 end
 
 --- True while the background refresh timer is running (for tests).
