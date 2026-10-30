@@ -636,6 +636,18 @@ describe("atlas.sidebar", function()
     end)
   end)
 
+  it("shows no line numbers, even with LazyVim-style relativenumber/statuscolumn defaults", function()
+    vim.o.relativenumber = true
+    vim.o.statuscolumn = "%l "
+    sidebar.toggle()
+    local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+    assert.is_false(vim.wo[win].number)
+    assert.is_false(vim.wo[win].relativenumber)
+    assert.are.equal("", vim.wo[win].statuscolumn)
+    vim.o.relativenumber = false
+    vim.o.statuscolumn = ""
+  end)
+
   it("hides worktrees that no longer exist on disk", function()
     state.touched[1].paths["/tmp/atlas-sb/gone"] = os.time()
     sidebar.toggle()

@@ -572,7 +572,11 @@ function M.open(path, session_id)
     vim.bo[buf].filetype = "AtlasReview"
     pcall(vim.api.nvim_buf_set_name, buf, "atlas://review/" .. vim.fn.fnamemodify(path, ":t"))
     vim.wo[0].number = false
+    -- LazyVim enables relativenumber and a statuscolumn that draws
+    -- its own numbers; neither is useful here.
     vim.wo[0].relativenumber = false
+    vim.wo[0].statuscolumn = ""
+    vim.wo[0].foldcolumn = "0"
     vim.wo[0].signcolumn = "no"
     vim.wo[0].wrap = false
     vim.wo[0].winbar = "%#AtlasHint#"
@@ -636,7 +640,11 @@ function M.open(path, session_id)
     vim.api.nvim_win_set_width(0, 34)
     vim.wo[0].winfixwidth = true
     vim.wo[0].number = false
+    -- LazyVim enables relativenumber and a statuscolumn that draws
+    -- its own numbers; neither is useful here.
     vim.wo[0].relativenumber = false
+    vim.wo[0].statuscolumn = ""
+    vim.wo[0].foldcolumn = "0"
     vim.wo[0].signcolumn = "no"
     vim.wo[0].wrap = false
     vim.wo[0].winbar = "%#AtlasKey#⏎%#AtlasHint# open  %#AtlasKey#←→%#AtlasHint# fold  %#AtlasKey#q%#AtlasHint# close"

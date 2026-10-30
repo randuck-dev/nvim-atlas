@@ -880,6 +880,11 @@ function M.toggle()
   vim.api.nvim_win_set_width(0, 40)
   vim.wo[0].winfixwidth = true
   vim.wo[0].number = false
+  -- LazyVim enables relativenumber and a statuscolumn that draws
+  -- its own numbers; neither is useful here.
+  vim.wo[0].relativenumber = false
+  vim.wo[0].statuscolumn = ""
+  vim.wo[0].foldcolumn = "0"
   vim.wo[0].signcolumn = "no"
   vim.wo[0].wrap = false
   if last then
