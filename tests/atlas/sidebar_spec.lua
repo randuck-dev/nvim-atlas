@@ -272,7 +272,8 @@ describe("atlas.sidebar", function()
     assert.truthy(session_bar:find("move", 1, true))
     assert.truthy(worktree_bar:find("review", 1, true))
     assert.truthy(worktree_bar:find("split", 1, true))
-    assert.truthy(worktree_bar:find("copy notes", 1, true))
+    assert.truthy(worktree_bar:find("copy", 1, true))
+    assert.truthy(worktree_bar:find("o PR", 1, true) or worktree_bar:gsub("%%#[%w_]+#", ""):find("o PR", 1, true))
     for _, bar in ipairs({ repo_bar, session_bar, worktree_bar }) do
       assert.truthy(bar:gsub("%%#[%w_]+#", ""):find("? more", 1, true), "every row should point at ? for the full list")
     end
@@ -530,6 +531,108 @@ describe("atlas.sidebar", function()
 
       assert.truthy(line_of("▾ observability"))
       assert.are.equal("observability", sections.section_of("a"))
+    end)
+  end)
+
+  describe("PR status", function()
+    local real_open
+
+    before_each(function()
+      real_open = vim.ui.open
+    end)
+    after_each(function()
+      vim.ui.open = real_open
+    end)
+
+    local function worktree_line()
+      for i, l in ipairs(vim.split(sidebar_text() or "", "\n")) do
+        if l:find("repo-a", 1, true) then
+          return i, l
+        end
+      end
+    end
+
+    local function with_pr(pr)
+      data.pr_status = function(_, cb)
+        pr_calls = pr_calls + 1
+        cb({ ["/tmp/atlas-sb/repo-a"] = pr })
+      end
+    end
+
+    local cases = {
+      { "merged", { number = 1, state = "MERGED", checks = "passing" }, "\u{f419}", "AtlasPrMerged" },
+      { "approved", { number = 2, state = "OPEN", review = "APPROVED", checks = "passing" }, "\u{f42e}", "AtlasPrApproved" },
+      { "draft", { number = 3, state = "OPEN", is_draft = true, checks = "none" }, "\u{f4dd}", "AtlasPrDraft" },
+      { "in review", { number = 4, state = "OPEN", review = "REVIEW_REQUIRED", checks = "pending" }, "\u{f407}", "AtlasPrReview" },
+    }
+    for _, c in ipairs(cases) do
+      it("shows a " .. c[1] .. " PR as the first thing on the worktree row, coloured", function()
+        with_pr(c[2])
+        sidebar.toggle()
+        assert.is_true(wait_for(function()
+          local _, l = worktree_line()
+          return l and l:find("#" .. c[2].number, 1, true) ~= nil
+        end))
+        local i, l = worktree_line()
+        assert.are.equal("      " .. c[3] .. " repo-a", l:sub(1, #("      " .. c[3] .. " repo-a")))
+
+        local b = vim.fn.bufnr("atlas://sidebar")
+        local ns = vim.api.nvim_create_namespace("atlas_sidebar")
+        local found = false
+        for _, m in ipairs(vim.api.nvim_buf_get_extmarks(b, ns, { i - 1, 0 }, { i - 1, -1 }, { details = true })) do
+          if m[3] == 6 and m[4].hl_group == c[4] then
+            found = true
+          end
+        end
+        assert.is_true(found, "icon should be highlighted " .. c[4])
+        sidebar.toggle()
+      end)
+    end
+
+    it("keeps names aligned when there's no PR", function()
+      with_pr(nil)
+      sidebar.toggle()
+      assert.is_true(wait_for(function()
+        return worktree_line() ~= nil
+      end))
+      local _, l = worktree_line()
+      assert.are.equal("        repo-a", l)
+    end)
+
+    it("o opens the worktree's PR in the browser", function()
+      with_pr({ number = 9, state = "OPEN", url = "https://github.com/o/r/pull/9", checks = "none" })
+      local opened
+      vim.ui.open = function(url)
+        opened = url
+        return nil, nil
+      end
+      sidebar.toggle()
+      assert.is_true(wait_for(function()
+        local _, l = worktree_line()
+        return l and l:find("#9", 1, true) ~= nil
+      end))
+      local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+      vim.api.nvim_set_current_win(win)
+      vim.api.nvim_win_set_cursor(win, { (worktree_line()), 0 })
+      vim.api.nvim_feedkeys("o", "x", false)
+      assert.are.equal("https://github.com/o/r/pull/9", opened)
+    end)
+
+    it("o does nothing but tell you when there's no PR", function()
+      with_pr(nil)
+      local opened = false
+      vim.ui.open = function()
+        opened = true
+      end
+      sidebar.toggle()
+      assert.is_true(wait_for(function()
+        return worktree_line() ~= nil
+      end))
+      local win = vim.fn.bufwinid(vim.fn.bufnr("atlas://sidebar"))
+      vim.api.nvim_set_current_win(win)
+      vim.api.nvim_win_set_cursor(win, { (worktree_line()), 0 })
+      vim.api.nvim_feedkeys("o", "x", false)
+      assert.is_false(opened)
     end)
   end)
 

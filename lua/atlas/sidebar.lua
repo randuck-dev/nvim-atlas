@@ -33,13 +33,45 @@ local pr_fetched_at = 0 -- vim.uv.now() of the last gh fetch
 
 --- Polling intervals: { poll_ms, pr_poll_ms }.
 function M.configure(opts)
-  config = vim.tbl_extend("force", config, opts or {})
+  opts = opts or {}
+  if opts.pr_icons then
+    PR_ICON = vim.tbl_extend("force", PR_ICON, opts.pr_icons)
+  end
+  opts.pr_icons = nil
+  config = vim.tbl_extend("force", config, opts)
 end
 
 local STATE_GLYPH = { input = "● ", done = "◆ ", working = "… " }
 local STATE_HL = { input = "AtlasStateInput", done = "AtlasStateDone", working = "AtlasStateWorking" }
 
 local CHECK_GLYPH = { passing = "✓", failing = "✗", pending = "…", none = "•" }
+
+-- PR status, shown first on a worktree row. Nerd Font Octicons; override
+-- with setup({ pr_icons = { merged = "M", ... } }) if your font lacks them.
+local PR_ICON = {
+  merged = "\u{f419}", -- git-merge
+  closed = "\u{f4dc}", -- git-pull-request-closed
+  draft = "\u{f4dd}", -- git-pull-request-draft
+  approved = "\u{f42e}", -- check
+  changes = "\u{f467}", -- x
+  review = "\u{f407}", -- git-pull-request
+}
+local PR_HL = {
+  merged = "AtlasPrMerged",
+  closed = "AtlasPrClosed",
+  draft = "AtlasPrDraft",
+  approved = "AtlasPrApproved",
+  changes = "AtlasPrChanges",
+  review = "AtlasPrReview",
+}
+local PR_LABEL = {
+  merged = "PR merged",
+  approved = "PR approved",
+  review = "PR open, in review",
+  changes = "PR: changes requested",
+  draft = "PR draft",
+  closed = "PR closed, not merged",
+}
 local CHECK_HL = { passing = "AtlasCheckPassing", failing = "AtlasCheckFailing", pending = "AtlasCheckPending", none = "AtlasCheckNone" }
 
 local function setup_highlights()
@@ -52,6 +84,12 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AtlasCheckPending", { fg = "#f6c177", default = true })
   vim.api.nvim_set_hl(0, "AtlasCheckNone", { fg = "#6e6a86", default = true })
   vim.api.nvim_set_hl(0, "AtlasNoteBadge", { fg = "#ebbcba", default = true }) -- rose
+  vim.api.nvim_set_hl(0, "AtlasPrMerged", { fg = "#c4a7e7", default = true }) -- purple (iris)
+  vim.api.nvim_set_hl(0, "AtlasPrApproved", { fg = "#8fd18b", default = true }) -- green
+  vim.api.nvim_set_hl(0, "AtlasPrReview", { fg = "#8fd18b", default = true }) -- green
+  vim.api.nvim_set_hl(0, "AtlasPrDraft", { fg = "#6e6a86", default = true }) -- gray (muted)
+  vim.api.nvim_set_hl(0, "AtlasPrChanges", { fg = "#eb6f92", default = true }) -- red (love)
+  vim.api.nvim_set_hl(0, "AtlasPrClosed", { fg = "#eb6f92", default = true }) -- red (love)
   vim.api.nvim_set_hl(0, "AtlasRepo", { fg = "#9ccfd8", bold = true, default = true }) -- foam
   vim.api.nvim_set_hl(0, "AtlasSection", { fg = "#c4a7e7", bold = true, default = true }) -- iris
   vim.api.nvim_set_hl(0, "AtlasKey", { fg = "#f6c177", bold = true, default = true }) -- gold
@@ -134,6 +172,21 @@ local function ensure_buf()
       peek.open(row.session_id)
     end
   end, "atlas: review worktree / peek session under cursor")
+
+  map("o", function()
+    local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
+    if not row or row.kind ~= "worktree" then
+      return
+    end
+    if not row.pr_url then
+      vim.notify("atlas: no PR for this worktree (yet)", vim.log.levels.INFO)
+      return
+    end
+    local _, err = vim.ui.open(row.pr_url)
+    if err then
+      vim.notify("atlas: couldn't open " .. row.pr_url .. ": " .. err, vim.log.levels.ERROR)
+    end
+  end, "atlas: open the worktree's PR in the browser")
 
   map("v", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
@@ -328,7 +381,7 @@ local HINTS = {
   repo = { { "←→", "fold" }, { "n", "new worktree" } },
   section = { { "←→", "fold" }, { "R", "rename" }, { "d", "delete" } },
   session = { { "⏎", "open" }, { "s", "send" }, { "m", "move" }, { "X", "clean" } },
-  worktree = { { "⏎", "review" }, { "v", "split" }, { "y", "copy notes" } },
+  worktree = { { "⏎", "review" }, { "v", "split" }, { "o", "PR" }, { "y", "copy" } },
   -- A session whose folder was removed: closing it is the useful action.
   session_gone = { { "⏎", "open" }, { "X", "close session" } },
 }
@@ -338,6 +391,7 @@ local HELP = {
   { "⏎", "session: open live view" },
   { "", "worktree: review (unified)" },
   { "v", "worktree: side-by-side review" },
+  { "o", "worktree: open its PR in browser" },
   { "n", "new worktree + session" },
   { "m", "move session to a section" },
   { "S", "new section" },
@@ -351,6 +405,7 @@ local HELP = {
   { "?", "hide this list" },
 }
 local HELP_FOOTER = "in a diff: <leader>aa adds a note"
+local PR_ORDER = { "merged", "approved", "review", "changes", "draft", "closed" }
 
 --- The winbar string for a row kind ("repo"/"session"/"worktree"/nil).
 function M.legend_for(kind)
@@ -512,8 +567,17 @@ local function render(sessions, touched, pr_by_path, changed, repos)
     end
 
     for _, path in ipairs(paths) do
-      local wline = "      " .. vim.fn.fnamemodify(path, ":t")
+      -- PR status first (icon + colour), so it's easy to scan; the PR
+      -- number and CI result stay on the right. No PR: a blank slot,
+      -- so names stay aligned.
       local pr = pr_by_path[path]
+      local kind = pr and data.pr_kind(pr)
+      local icon = kind and PR_ICON[kind] or " "
+      local prefix = "      "
+      local wline = prefix .. icon .. " " .. vim.fn.fnamemodify(path, ":t")
+      if kind then
+        highlights[#highlights + 1] = { #lines, #prefix, #prefix + #icon, PR_HL[kind] }
+      end
       if pr then
         local check_glyph = CHECK_GLYPH[pr.checks] or "•"
         local badge_start = #wline
@@ -530,6 +594,7 @@ local function render(sessions, touched, pr_by_path, changed, repos)
       rows[#lines] = {
         kind = "worktree",
         session_id = session.session_id,
+        pr_url = pr and pr.url,
         path = path,
         root = root,
         group = group,
@@ -612,6 +677,13 @@ local function render(sessions, touched, pr_by_path, changed, repos)
     end
     lines[#lines + 1] = "  " .. HELP_FOOTER
     highlights[#highlights + 1] = { #lines - 1, 0, #lines[#lines], "AtlasHint" }
+    lines[#lines + 1] = ""
+    for _, kind in ipairs(PR_ORDER) do
+      local icon = PR_ICON[kind]
+      lines[#lines + 1] = "  " .. icon .. string.rep(" ", 4 - vim.fn.strdisplaywidth(icon)) .. PR_LABEL[kind]
+      highlights[#highlights + 1] = { #lines - 1, 2, 2 + #icon, PR_HL[kind] }
+      highlights[#highlights + 1] = { #lines - 1, 2 + #icon, #lines[#lines], "AtlasHint" }
+    end
   end
 
   local b = ensure_buf()

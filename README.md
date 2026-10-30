@@ -27,6 +27,7 @@ In the sidebar, the top bar shows the keys for the row under the cursor;
 | `v`    |                                          | review side by side (diffview) |
 | `s`    | send all pending notes into the session  |                                      |
 | `X`    | clean up its finished worktrees, including its own (closes the session) |    |
+| `o`    |                                          | open its PR in the browser           |
 | `y`    |                                          | copy its pending notes               |
 | `r`    | refresh now (including PR/CI)            | same                                 |
 | `q`    | close the sidebar                        | same                                 |
@@ -61,6 +62,12 @@ In the session view: `i` to type into the session, `<C-\><C-n>` back to
 normal mode, `q` to close it. It's a real tmux client on a temporary
 grouped session, so it renders exactly like tmux; while you type there,
 the shared tmux window resizes to fit the Neovim window.
+
+A worktree with a PR starts with its status icon (Nerd Font Octicons):
+merged (purple), approved (green check), open in review (green), changes
+requested (red), draft (gray), closed (red); the PR number and CI result
+follow the name. `?` lists what each icon means. Other fonts:
+`setup({ pr_icons = { merged = "M", ... } })`.
 
 `n` asks for a branch name, creates the worktree with worktrunk
 (`wt switch -c`, falling back to `git worktree add`) and opens a tmux

@@ -233,6 +233,7 @@ local function match_pr(prs, branch)
         state = pr.state,
         url = pr.url,
         is_draft = pr.isDraft,
+        review = pr.reviewDecision, -- APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | ""
         checks = summarize_checks(pr.statusCheckRollup),
       }
     end
@@ -240,6 +241,24 @@ local function match_pr(prs, branch)
   return nil
 end
 M._match_pr = match_pr
+
+--- One word for where a PR stands, in priority order: "merged",
+--- "closed" (not merged), "draft", "approved", "changes" (changes
+--- requested), or "review" (open, waiting for review).
+function M.pr_kind(pr)
+  if pr.state == "MERGED" then
+    return "merged"
+  elseif pr.state == "CLOSED" then
+    return "closed"
+  elseif pr.is_draft then
+    return "draft"
+  elseif pr.review == "APPROVED" then
+    return "approved"
+  elseif pr.review == "CHANGES_REQUESTED" then
+    return "changes"
+  end
+  return "review"
+end
 
 --- PR/CI status for a set of worktree paths, one `gh pr list` call per
 --- distinct repo (grouped by origin) rather than one per worktree, so API
@@ -279,7 +298,7 @@ function M.pr_status(paths, cb)
           return function(done)
             run_json({
               "gh", "pr", "list", "-R", repo, "--state", "all", "--json",
-              "number,state,url,headRefName,isDraft,statusCheckRollup",
+              "number,state,url,headRefName,isDraft,reviewDecision,statusCheckRollup",
             }, function(prs)
               done({ repo = repo, prs = prs or {} })
             end)
