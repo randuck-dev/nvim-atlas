@@ -648,6 +648,23 @@ describe("atlas.sidebar", function()
     vim.o.statuscolumn = ""
   end)
 
+  it("shows the name atlas gave a session it started, before Claude has a title", function()
+    local spawn = require("atlas.spawn")
+    local names_file = vim.fn.tempname() .. "/names.json"
+    spawn._set_names_path(names_file)
+    spawn.remember("/tmp/atlas-sb/repo-a", "login-fix-4f9a2c")
+    state.sessions = { { session_id = "s1", state = "done", title = "", cwd = "/tmp/atlas-sb/repo-a", since = os.time() } }
+
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("login-fix-4f9a2c", 1, true) ~= nil
+    end))
+
+    spawn._set_names_path(nil)
+    vim.fn.delete(vim.fn.fnamemodify(names_file, ":h"), "rf")
+  end)
+
   it("hides worktrees that no longer exist on disk", function()
     state.touched[1].paths["/tmp/atlas-sb/gone"] = os.time()
     sidebar.toggle()

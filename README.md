@@ -71,8 +71,9 @@ follow the name. `?` lists what each icon means. Other fonts:
 
 `n` asks for a branch name, creates the worktree with worktrunk
 (`wt switch -c`, falling back to `git worktree add`) and opens a tmux
-window named after the branch running `claude`, in the background. The
-new session shows up under its repo once Claude starts.
+window named after the branch running `claude -n <branch>-<6 hex>`, in
+the background: the session is named after its branch plus a short
+random suffix, and the sidebar shows that name right away.
 
 A session whose folder was removed (e.g. with `wt remove` while Claude
 kept running) shows as `(folder removed)`; `X` on it closes the leftover

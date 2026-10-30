@@ -29,8 +29,12 @@ end
 describe("atlas.spawn", function()
   local real_input
 
+  local names_file
+
   before_each(function()
     real_input = vim.ui.input
+    names_file = vim.fn.tempname() .. "/names.json"
+    spawn._set_names_path(names_file)
     root = vim.fn.resolve(vim.fn.tempname())
     vim.fn.mkdir(root .. "/repo", "p")
     git(root .. "/repo", { "init", "-q", "-b", "main" })
@@ -49,6 +53,8 @@ describe("atlas.spawn", function()
 
   after_each(function()
     vim.ui.input = real_input
+    spawn._set_names_path(nil)
+    vim.fn.delete(vim.fn.fnamemodify(names_file, ":h"), "rf")
     sh({ "tmux", "kill-session", "-t", tmux_session })
     vim.fn.delete(root, "rf")
   end)
@@ -105,6 +111,32 @@ describe("atlas.spawn", function()
     assert.is_true(result)
     assert.are.equal(1, vim.fn.isdirectory(root .. "/repo-new-thing"))
     assert.truthy(vim.tbl_contains(windows(), "new-thing"))
+  end)
+
+  it("names a session after its branch plus a short random suffix", function()
+    local a, b = spawn.session_name("feature/login"), spawn.session_name("feature/login")
+    assert.truthy(a:match("^feature%-login%-%x%x%x%x%x%x$"), a)
+    assert.are_not.equal(a, b)
+  end)
+
+  it("starts claude with that name", function()
+    assert.are.equal("claude -n 'fix-x-1a2b3c'; exec ${SHELL:-zsh}", spawn.command_for({ session_name = "fix-x-1a2b3c" }))
+    assert.are.equal("claude; exec ${SHELL:-zsh}", spawn.command_for({}))
+  end)
+
+  it("prompt: remembers the name it gave the new worktree's session", function()
+    vim.ui.input = function(_, cb)
+      cb("named-thing")
+    end
+    local got
+    spawn.prompt(root .. "/repo", function(_, name)
+      got = name
+    end, { use_wt = false, session = tmux_session, command = "sleep 300" })
+
+    local path = vim.fn.resolve(root .. "/repo-named-thing")
+    local name = spawn.name_for(path) or spawn.name_for(root .. "/repo-named-thing")
+    assert.truthy(got and got:match("^named%-thing%-%x+$"), tostring(got))
+    assert.are.equal(got, name)
   end)
 
   it("prompt: does nothing when cancelled", function()

@@ -463,6 +463,7 @@ local function render(sessions, touched, pr_by_path, changed, repos)
   -- Sessions the user moved into a section go there; the rest are
   -- grouped by the repo that owns their folder.
   local sec = sections.load()
+  local spawned_names = require("atlas.spawn").names()
   local in_section = {}
   for _, name in ipairs(sec.sections) do
     in_section[name] = {}
@@ -506,7 +507,12 @@ local function render(sessions, touched, pr_by_path, changed, repos)
     local _, repo_name, root = repo_group(repos, session.cwd or "")
     local indent = "  "
     local glyph = STATE_GLYPH[session.state] or "  "
-    local title = session.title ~= "" and session.title or session.session_id
+    -- A session atlas started (`n`) shows the name it was given, from
+    -- the first second -- claude-status only learns titles once the
+    -- session has a transcript.
+    local title = spawned_names[session.cwd or ""]
+      or (session.title ~= "" and session.title)
+      or session.session_id
     local elapsed = format_elapsed(session.since)
     local line = indent .. glyph .. title
     local repo_start, repo_end

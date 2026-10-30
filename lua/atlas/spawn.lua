@@ -11,6 +11,55 @@
 
 local M = {}
 
+-- Names atlas gave the sessions it started, by worktree path, so the
+-- sidebar can show them right away: `claude -n <name>` names the session
+-- in Claude itself, but claude-status reads titles from the transcript,
+-- which doesn't exist until the session's first message.
+local names_override = nil
+local function names_path()
+  return names_override or (vim.fn.stdpath("state") .. "/nvim-atlas/names.json")
+end
+
+--- For tests: store names somewhere else (nil restores the default).
+function M._set_names_path(p)
+  names_override = p
+end
+
+local function load_names()
+  local p = names_path()
+  if vim.fn.filereadable(p) == 0 then
+    return {}
+  end
+  local ok, data = pcall(vim.json.decode, table.concat(vim.fn.readfile(p), "\n"))
+  return (ok and type(data) == "table" and not vim.islist(data)) and data or {}
+end
+
+--- All remembered names: { [worktree path] = name }.
+M.names = load_names
+
+--- The name atlas gave the session it started in `path`, or nil.
+function M.name_for(path)
+  return path and load_names()[path] or nil
+end
+
+function M.remember(path, name)
+  local names = load_names()
+  names[path] = name
+  vim.fn.mkdir(vim.fn.fnamemodify(names_path(), ":h"), "p")
+  vim.fn.writefile({ vim.json.encode(names) }, names_path())
+end
+
+--- "<branch>-<6 hex>": the branch (made safe as a name) plus a short
+--- random suffix, so sessions on similar branches stay easy to tell apart.
+function M.session_name(branch)
+  local slug = branch:gsub("[^%w._-]", "-")
+  local bytes = vim.uv.random(3)
+  local hex = bytes and (bytes:gsub(".", function(c)
+    return string.format("%02x", c:byte())
+  end)) or string.format("%06x", math.random(0, 0xffffff))
+  return slug .. "-" .. hex
+end
+
 local function run(args, cwd)
   local r = vim.system(args, { text = true, cwd = cwd }):wait()
   return r.code == 0, vim.trim(r.stdout or ""), vim.trim(r.stderr or "")
@@ -62,10 +111,20 @@ function M.create_worktree(root, branch, opts)
   return path
 end
 
+--- The shell command a spawned window runs: opts.command, else
+--- `claude -n <opts.session_name>` (plain `claude` without a name), then
+--- a shell, so the window stays useful after Claude exits.
+function M.command_for(opts)
+  opts = opts or {}
+  local claude = opts.session_name and ("claude -n " .. vim.fn.shellescape(opts.session_name)) or "claude"
+  return (opts.command or claude) .. "; exec ${SHELL:-zsh}"
+end
+
 --- Opens a background tmux window named after `branch` in tmux session
 --- `session` (default: the session this Neovim runs in), running
---- opts.command (default "claude") in `path`. If a window with that name
---- exists, leaves it alone. Returns ok, err.
+--- opts.command in `path` (default: `claude -n <opts.session_name>`, or
+--- plain `claude` without one). If a window with that name exists,
+--- leaves it alone. Returns ok, err.
 function M.open_window(path, branch, opts)
   opts = opts or {}
   local session = opts.session
@@ -77,7 +136,7 @@ function M.open_window(path, branch, opts)
     session = out
   end
   local name = branch:gsub("/", "-")
-  local command = (opts.command or "claude") .. "; exec ${SHELL:-zsh}"
+  local command = M.command_for(opts)
 
   local _, windows = run({ "tmux", "list-windows", "-t", session, "-F", "#W" })
   for w in (windows .. "\n"):gmatch("(.-)\n") do
@@ -113,14 +172,16 @@ function M.prompt(root, cb, opts)
       cb(false)
       return
     end
-    local ok, werr = M.open_window(path, branch, opts)
+    local name = M.session_name(branch)
+    local ok, werr = M.open_window(path, branch, vim.tbl_extend("force", opts or {}, { session_name = name }))
     if not ok then
       vim.notify("atlas: worktree created at " .. path .. ", but " .. werr, vim.log.levels.WARN)
       cb(false)
       return
     end
-    vim.notify("atlas: started " .. branch .. " in " .. repo, vim.log.levels.INFO)
-    cb(true)
+    M.remember(path, name)
+    vim.notify("atlas: started " .. name .. " in " .. repo, vim.log.levels.INFO)
+    cb(true, name)
   end)
 end
 
