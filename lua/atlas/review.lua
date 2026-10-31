@@ -19,9 +19,9 @@ local M = {}
 --- is just carried along in the tab's context for annotate.lua to use;
 --- review.lua itself doesn't interpret it.
 function M.open(path, session_id)
-  data.merge_base(path, function(base, target, err)
+  data.review_base(path, function(base, target, err)
     if err then
-      vim.notify("atlas: couldn't compute merge base for " .. path .. ": " .. err, vim.log.levels.ERROR)
+      vim.notify("atlas: nothing to review against for " .. path .. ": " .. err, vim.log.levels.ERROR)
       return
     end
 

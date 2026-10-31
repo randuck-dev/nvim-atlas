@@ -114,6 +114,49 @@ function M.merge_base(dir, cb)
   end)
 end
 
+--- What to review `dir` against: cb(base, target, err). Normally its
+--- merge base with the target branch (merge_base). A new repo has
+--- nothing to compare with -- no commits yet, or no remote and the
+--- target is the branch you're on -- so then base is the empty tree and
+--- everything in the repo shows as new; target is "(new repo)".
+function M.review_base(dir, cb)
+  local function from_scratch()
+    run({ "git", "-C", dir, "hash-object", "-t", "tree", "/dev/null" }, function(ok, out)
+      if ok then
+        cb(vim.trim(out), "(new repo)", nil)
+      else
+        cb(nil, nil, "not a git repo: " .. dir)
+      end
+    end)
+  end
+  M.merge_base(dir, function(base, target, err)
+    if not base then
+      -- No commits or no target: still review it if it's a repo.
+      run({ "git", "-C", dir, "rev-parse", "--git-dir" }, function(is_repo)
+        if is_repo then
+          from_scratch()
+        else
+          cb(nil, nil, (err and err ~= "") and err or ("not a git repo: " .. dir))
+        end
+      end)
+      return
+    end
+    run({ "git", "-C", dir, "remote" }, function(_, remotes)
+      if vim.trim(remotes or "") ~= "" then
+        cb(base, target, nil)
+        return
+      end
+      run({ "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD" }, function(_, branch)
+        if vim.trim(branch or "") == target then
+          from_scratch()
+        else
+          cb(base, target, nil)
+        end
+      end)
+    end)
+  end)
+end
+
 --- The repo `dir` belongs to, identified by its main checkout, so every
 --- worktree of a repo maps to the same place (e.g. devtool.hub ->
 --- devtool). cb({ root = main checkout path, name = its folder name }),
@@ -132,8 +175,8 @@ end
 
 --- Whether `dir` has anything to review: uncommitted or untracked files,
 --- or commits that aren't in its target branch (the same merge-base
---- comparison `git review` uses). cb(true|false). Without a target
---- branch, only uncommitted/untracked files count.
+--- comparison `git review` uses). cb(true|false). In a new repo (see
+--- review_base), any commit counts.
 function M.has_changes(dir, cb)
   run({ "git", "-C", dir, "status", "--porcelain" }, function(ok, out)
     if not ok then
@@ -144,12 +187,14 @@ function M.has_changes(dir, cb)
       cb(true)
       return
     end
-    M.merge_base(dir, function(base)
+    M.review_base(dir, function(base, target)
       if not base then
         cb(false)
         return
       end
-      run({ "git", "-C", dir, "rev-list", "--count", base .. "..HEAD" }, function(ok2, count)
+      -- A new repo: anything committed is new.
+      local range = target == "(new repo)" and "HEAD" or (base .. "..HEAD")
+      run({ "git", "-C", dir, "rev-list", "--count", range }, function(ok2, count)
         cb(ok2 and (tonumber(vim.trim(count)) or 0) > 0)
       end)
     end)

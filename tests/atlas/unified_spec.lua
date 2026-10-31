@@ -449,3 +449,59 @@ describe("atlas.unified file panel as a folder tree (real git)", function()
     assert.are.equal(4, marks[1][2]) -- panel line 5
   end)
 end)
+
+describe("atlas.unified review of a new repo (real git)", function()
+  local root
+
+  local function git(dir, args)
+    local r = vim.system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
+    assert(r.code == 0, "git " .. table.concat(args, " ") .. ": " .. (r.stderr or ""))
+  end
+
+  local function open_review(dir)
+    local before = vim.api.nvim_get_current_buf()
+    unified.open(dir, "atlas-unified-newrepo-test")
+    assert.is_true(vim.wait(5000, function()
+      local b = vim.api.nvim_get_current_buf()
+      return b ~= before and unified.is_unified(b) and vim.api.nvim_buf_line_count(b) > 1
+    end, 20), "review should open")
+    return table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  end
+
+  before_each(function()
+    root = vim.fn.resolve(vim.fn.tempname())
+    vim.fn.mkdir(root, "p")
+    git(root, { "init", "-q", "-b", "main" })
+    git(root, { "config", "user.email", "t@example.com" })
+    git(root, { "config", "user.name", "t" })
+  end)
+
+  after_each(function()
+    vim.cmd("tabfirst")
+    vim.cmd("silent! tabonly")
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("with no commits yet, shows staged and untracked files as new", function()
+    vim.fn.writefile({ "staged" }, root .. "/a.txt")
+    git(root, { "add", "a.txt" })
+    vim.fn.writefile({ "loose" }, root .. "/b.txt")
+
+    local text = open_review(root)
+    assert.truthy(text:find("+staged", 1, true))
+    assert.truthy(text:find("+loose", 1, true))
+    assert.are.equal("(new repo)", vim.t.atlas_review.target)
+  end)
+
+  it("with commits on main and no remote, shows everything, not just uncommitted edits", function()
+    vim.fn.writefile({ "first" }, root .. "/a.txt")
+    git(root, { "add", "." })
+    git(root, { "commit", "-q", "-m", "init" })
+    vim.fn.writefile({ "first", "second" }, root .. "/a.txt")
+
+    local text = open_review(root)
+    assert.truthy(text:find("+first", 1, true), "committed content shows as new")
+    assert.truthy(text:find("+second", 1, true))
+    assert.are.equal("(new repo)", vim.t.atlas_review.target)
+  end)
+end)
