@@ -647,7 +647,7 @@ function M.open(path, session_id)
     vim.wo[0].foldcolumn = "0"
     vim.wo[0].signcolumn = "no"
     vim.wo[0].wrap = false
-    vim.wo[0].winbar = "%#AtlasKey#⏎%#AtlasHint# open  %#AtlasKey#←→%#AtlasHint# fold  %#AtlasKey#q%#AtlasHint# close"
+    vim.wo[0].winbar = "%#AtlasKey#⏎→%#AtlasHint# open  %#AtlasKey#←%#AtlasHint# fold  %#AtlasKey#q%#AtlasHint# close"
     views[buf].panel_buf = pbuf
 
     local function panel_row()
@@ -674,19 +674,8 @@ function M.open(path, session_id)
         set_folded(row.parent, true) -- inside a folder: fold it, go to it
       end
     end
-    local function expand()
-      local _, row = panel_row()
-      if row and row.kind == "dir" and views[buf].folded[row.path] then
-        set_folded(row.path, false)
-      end
-    end
-
-    vim.keymap.set("n", "<CR>", function()
-      local view, row = panel_row()
-      if row and row.kind == "dir" then
-        set_folded(row.path, not view.folded[row.path])
-        return
-      end
+    -- Moves to the file's place in the diff.
+    local function jump_to_file(view, row)
       local f = row and row.kind == "file" and view.files[row.index]
       local win = vim.fn.bufwinid(buf)
       if f and win ~= -1 then
@@ -695,12 +684,32 @@ function M.open(path, session_id)
         vim.cmd("normal! zt")
         mark_current(buf)
       end
+    end
+    -- Like a file tree: on a folder, open it; on a file, go into it.
+    local function expand()
+      local view, row = panel_row()
+      if row and row.kind == "dir" then
+        if view.folded[row.path] then
+          set_folded(row.path, false)
+        end
+        return
+      end
+      jump_to_file(view, row)
+    end
+
+    vim.keymap.set("n", "<CR>", function()
+      local view, row = panel_row()
+      if row and row.kind == "dir" then
+        set_folded(row.path, not view.folded[row.path])
+        return
+      end
+      jump_to_file(view, row)
     end, { buffer = pbuf, nowait = true, desc = "atlas: jump to file / fold folder" })
     for _, lhs in ipairs({ "<Left>", "h" }) do
       vim.keymap.set("n", lhs, collapse, { buffer = pbuf, nowait = true, desc = "atlas: fold folder" })
     end
     for _, lhs in ipairs({ "<Right>", "l" }) do
-      vim.keymap.set("n", lhs, expand, { buffer = pbuf, nowait = true, desc = "atlas: open folder" })
+      vim.keymap.set("n", lhs, expand, { buffer = pbuf, nowait = true, desc = "atlas: open folder / go to file" })
     end
     vim.keymap.set("n", "q", function()
       if #vim.api.nvim_list_tabpages() > 1 then

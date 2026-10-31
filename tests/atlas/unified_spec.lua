@@ -426,6 +426,18 @@ describe("atlas.unified file panel as a folder tree (real git)", function()
     assert.are.equal(4, vim.api.nvim_win_get_cursor(pwin)[1])
   end)
 
+  it("→ (and l) on a file jumps to it, like a file tree", function()
+    local pwin = panel()
+    press(pwin, 5, "<Right>")
+    assert.are.equal(buf, vim.api.nvim_get_current_buf())
+    assert.are.equal("▍ tests/z_spec.lua  (new)", vim.api.nvim_get_current_line())
+
+    pwin = panel()
+    press(pwin, 2, "l")
+    assert.are.equal(buf, vim.api.nvim_get_current_buf())
+    assert.truthy(vim.api.nvim_get_current_line():find("lua/atlas/x.lua", 1, true))
+  end)
+
   it("⏎ on a file jumps to it, and the panel marks it as current", function()
     local pwin, pbuf = panel()
     press(pwin, 5, "<CR>")

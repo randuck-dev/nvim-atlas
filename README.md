@@ -61,8 +61,8 @@ The unified review shows everything the worktree changed since its merge
 base (committed, uncommitted and untracked) in one buffer, GitHub style,
 with old/new line numbers and syntax highlighting (from each file's
 whole current/base version, like diffview), and a panel of changed files
-on the left as a folder tree (status, +/- counts; `⏎` jumps to a file;
-`←`/`→` fold folders; the file you're reading is highlighted). In the diff: `]c`/`[c` next/previous hunk, `]f`/`[f` next/
+on the left as a folder tree (status, +/- counts; `⏎` or `→` jumps to a file;
+`←`/`→` fold and open folders; the file you're reading is highlighted). In the diff: `]c`/`[c` next/previous hunk, `]f`/`[f` next/
 previous file, `⏎` opens the file at that line in a split, `r` reloads,
 `q` closes.
 
