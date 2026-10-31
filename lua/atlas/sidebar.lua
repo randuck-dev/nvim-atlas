@@ -437,6 +437,15 @@ local function ensure_buf()
     M.redraw()
   end, "atlas: show/hide all keys")
 
+  -- Showing again after polling stopped (closed with :q, say, then
+  -- shown again some other way than toggle): pick it back up.
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    buffer = buf,
+    callback = function()
+      vim.schedule(M._resume)
+    end,
+  })
+
   -- The legend in the top bar follows the row under the cursor.
   vim.api.nvim_create_autocmd("CursorMoved", {
     buffer = buf,
@@ -955,8 +964,10 @@ local function render(sessions, touched, pr_by_path, changed, repos, extra)
   M.update_legend()
 end
 
+-- Open in any tab, not just the current one: a review opens its own
+-- tab, and polling must not stop (for good) while you're in it.
 local function is_open()
-  return buf ~= nil and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) ~= -1
+  return buf ~= nil and vim.api.nvim_buf_is_valid(buf) and #vim.fn.win_findbuf(buf) > 0
 end
 
 -- Last local data rendered, so reopening the sidebar (or a PR fetch
@@ -1179,6 +1190,15 @@ local function start_polling()
       end
     end)
   )
+end
+
+--- Restarts polling (and refreshes) if the sidebar is showing but
+--- polling has stopped.
+function M._resume()
+  if is_open() and not (timer and not timer:is_closing()) then
+    start_polling()
+    M.refresh(false)
+  end
 end
 
 --- Forgets cached state and in-flight flags (for tests).

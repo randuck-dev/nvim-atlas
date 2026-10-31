@@ -118,6 +118,27 @@ describe("atlas.sidebar", function()
     end), "a session that appears later should show up via the background poll")
   end)
 
+  it("keeps refreshing while you're in another tab (e.g. a review)", function()
+    sidebar.toggle()
+    assert.is_true(wait_for(function()
+      local t = sidebar_text()
+      return t and t:find("first session", 1, true) ~= nil
+    end))
+    local sidebar_tab = vim.api.nvim_get_current_tabpage()
+
+    vim.cmd("tabnew") -- like opening a review
+    vim.wait(400) -- several polls while the sidebar isn't in this tab
+    table.insert(state.sessions, { session_id = "s2", state = "input", title = "second session", since = os.time() })
+    vim.wait(400)
+    vim.cmd("tabclose")
+    vim.api.nvim_set_current_tabpage(sidebar_tab)
+
+    assert.is_true(sidebar._polling(), "polling should still be running")
+    assert.is_true(wait_for(function()
+      return sidebar_text():find("second session", 1, true) ~= nil
+    end), "a session that appeared meanwhile should show up")
+  end)
+
   it("reuses cached PR/CI status between polls instead of calling gh every time", function()
     sidebar.toggle()
     vim.wait(700) -- several 100ms local polls
