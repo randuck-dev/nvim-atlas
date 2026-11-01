@@ -19,21 +19,25 @@ end
 function M.load()
   local p = path()
   if vim.fn.filereadable(p) == 0 then
-    return { sections = {}, assign = {}, collapsed = {} }
+    return { sections = {}, assign = {}, collapsed = {}, expanded = {} }
   end
   local ok, data = pcall(vim.json.decode, table.concat(vim.fn.readfile(p), "\n"))
   if not ok or type(data) ~= "table" then
-    return { sections = {}, assign = {}, collapsed = {} }
+    return { sections = {}, assign = {}, collapsed = {}, expanded = {} }
   end
   data.sections = type(data.sections) == "table" and data.sections or {}
   data.assign = type(data.assign) == "table" and data.assign or {}
   data.collapsed = type(data.collapsed) == "table" and data.collapsed or {}
+  data.expanded = type(data.expanded) == "table" and data.expanded or {}
   -- An empty JSON object decodes as an empty list; both mean "none".
   if vim.islist(data.assign) then
     data.assign = {}
   end
   if vim.islist(data.collapsed) then
     data.collapsed = {}
+  end
+  if vim.islist(data.expanded) then
+    data.expanded = {}
   end
   return data
 end
@@ -44,7 +48,12 @@ local function save(data)
     return next(t) and t or vim.empty_dict()
   end
   vim.fn.writefile({
-    vim.json.encode({ sections = data.sections, assign = obj(data.assign), collapsed = obj(data.collapsed or {}) }),
+    vim.json.encode({
+      sections = data.sections,
+      assign = obj(data.assign),
+      collapsed = obj(data.collapsed or {}),
+      expanded = obj(data.expanded or {}),
+    }),
   }, path())
 end
 
@@ -153,6 +162,18 @@ end
 function M.set_collapsed(key, collapsed)
   local data = M.load()
   data.collapsed[key] = collapsed or nil
+  save(data)
+end
+
+--- Whether a group that starts out collapsed (the "All sessions" tree:
+--- "all", "all:repo:<root>", ...) has been opened.
+function M.is_expanded(key)
+  return M.load().expanded[key] == true
+end
+
+function M.set_expanded(key, expanded)
+  local data = M.load()
+  data.expanded[key] = expanded or nil
   save(data)
 end
 

@@ -7,7 +7,12 @@ local M = {}
 function M.setup(opts)
   opts = opts or {}
   data.configure(opts)
-  sidebar.configure({ poll_ms = opts.poll_ms, pr_poll_ms = opts.pr_poll_ms, pr_icons = opts.pr_icons })
+  sidebar.configure({
+    poll_ms = opts.poll_ms,
+    pr_poll_ms = opts.pr_poll_ms,
+    history_poll_ms = opts.history_poll_ms,
+    pr_icons = opts.pr_icons,
+  })
   require("atlas.peek").configure({ leave_key = (opts.keys or {}).leave_view })
 
   vim.api.nvim_create_user_command("AtlasToggle", sidebar.toggle, {})

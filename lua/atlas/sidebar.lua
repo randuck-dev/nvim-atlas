@@ -13,6 +13,7 @@ local annotate = require("atlas.annotate")
 local deliver = require("atlas.deliver")
 local peek = require("atlas.peek")
 local sections = require("atlas.sections")
+local history_mod = require("atlas.history")
 
 local M = {}
 
@@ -24,12 +25,17 @@ local ns = vim.api.nvim_create_namespace("atlas_sidebar")
 local config = {
   poll_ms = 5000, -- claude-status: local files, cheap
   pr_poll_ms = 30000, -- gh: network, rate-limited
+  history_poll_ms = 30000, -- rescan ~/.claude/projects while "All sessions" is open
+  projects_dir = nil, -- default ~/.claude/projects
+  history_skip = nil, -- path prefixes to leave out (default: temp folders)
 }
 
 local timer = nil
 local in_flight = false -- never run two refreshes at once
 local pr_cache = {} -- path -> PR status, reused between gh polls
 local pr_fetched_at = 0 -- vim.uv.now() of the last gh fetch
+local history = nil -- every conversation on disk: { repos, removed, at }
+local history_in_flight = false
 
 --- Polling intervals: { poll_ms, pr_poll_ms }.
 function M.configure(opts)
@@ -170,27 +176,44 @@ local function ensure_buf()
     vim.keymap.set("n", lhs, fn, { buffer = buf, desc = desc, nowait = true })
   end
 
-  -- Folding sections and repo groups, tree-style.
+  -- Folding sections and repo groups, tree-style. Groups in the "All
+  -- sessions" tree start collapsed, so theirs is stored as "expanded".
+  local function set_folded(key, collapsed)
+    if key:sub(1, 3) == "all" then
+      sections.set_expanded(key, not collapsed)
+    else
+      sections.set_collapsed(key, collapsed)
+    end
+  end
   local function fold(open)
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
     if not row or not row.group then
       return
     end
-    local is_header = row.kind == "section" or row.kind == "repo"
+    local is_header = row.is_header == true
     if open then
       if is_header and row.collapsed then
-        sections.set_collapsed(row.group, false)
+        set_folded(row.group, false)
+        if row.kind == "all" then
+          M.load_history(false)
+        end
         M.redraw()
       end
       return
     end
-    -- On a header: collapse it. Inside a group: collapse the group and
-    -- jump to its header (nothing above it moves, so its line holds).
-    if not row.collapsed or not is_header then
-      sections.set_collapsed(row.group, true)
-      M.redraw()
+    -- On a header: collapse it. On a collapsed header inside another
+    -- group (the All tree nests): collapse that one. Inside a group:
+    -- collapse the group and jump to its header (nothing above it
+    -- moves, so its line holds).
+    local key, header = row.group, row.header
+    if is_header and row.collapsed then
+      key, header = row.parent_group, row.parent_header
     end
-    vim.api.nvim_win_set_cursor(0, { row.header, 0 })
+    if key then
+      set_folded(key, true)
+      M.redraw()
+      vim.api.nvim_win_set_cursor(0, { header, 0 })
+    end
     M.update_legend()
   end
   for _, lhs in ipairs({ "<Left>", "h" }) do
@@ -206,7 +229,19 @@ local function ensure_buf()
 
   map("<CR>", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
-    if row and (row.kind == "section" or row.kind == "repo") then
+    if row and (row.kind == "all_wt" or row.kind == "all_chat") and (row.session_id or row.pane) then
+      -- Live: jump in.
+      if row.session_id then
+        peek.open(row.session_id)
+      else
+        peek.open_pane(row.pane)
+      end
+    elseif row and row.kind == "all_chat" then
+      M.resume(row)
+    elseif row and row.kind == "all_more" then
+      sections.set_expanded(row.key, true)
+      M.redraw()
+    elseif row and row.is_header then
       fold(true)
     elseif row and row.kind == "worktree" then
       require("atlas.unified").open(row.path, row.session_id)
@@ -289,7 +324,7 @@ local function ensure_buf()
 
   map("c", function()
     local row = rows[vim.api.nvim_win_get_cursor(0)[1]]
-    if not row or row.kind ~= "idle" then
+    if not row or (row.kind ~= "idle" and row.kind ~= "all_wt") then
       return
     end
     -- Pick up where the last conversation there left off, if any.
@@ -472,6 +507,14 @@ local HINTS = {
   pane = { { "⏎", "open" } },
   -- A worktree of this repo with no session in it.
   idle = { { "⏎", "review" }, { "c", "start Claude" }, { "o", "PR" }, { "X", "clean" } },
+  -- The "All sessions" tree: every conversation on this machine.
+  all = { { "←→", "fold" }, { "r", "rescan" } },
+  all_repo = { { "←→", "fold" }, { "n", "new worktree" } },
+  all_wt = { { "←→", "fold" }, { "c", "start Claude" }, { "n", "new worktree" } },
+  all_wt_live = { { "⏎", "jump in" }, { "←→", "fold" } },
+  all_chat = { { "⏎", "resume" } },
+  all_chat_live = { { "⏎", "jump in" } },
+  all_more = { { "⏎", "show all" } },
 }
 
 local HELP = {
@@ -482,6 +525,7 @@ local HELP = {
   { "o", "worktree: open its PR in browser" },
   { "n", "new worktree + session" },
   { "c", "idle worktree: start Claude (continues)" },
+  { "", "all sessions: ⏎ resumes or jumps in" },
   { "m", "move session to a section" },
   { "S", "new section" },
   { "R", "rename section" },
@@ -515,7 +559,7 @@ function M.update_legend()
     return
   end
   local row = rows[vim.api.nvim_win_get_cursor(win)[1]]
-  local kind = row and row.kind
+  local kind = row and (row.legend or row.kind)
   if kind == "session" and row.gone then
     kind = "session_gone"
   end
@@ -615,6 +659,87 @@ local function correlate(sessions, touched, extra)
   return result
 end
 M._correlate = correlate
+
+-- The "All sessions" tree: every conversation on disk (history.repos)
+-- plus whatever's running right now, so a worktree with a live session
+-- or untracked Claude pane shows (and sorts first) even before it has
+-- a transcript. Doesn't modify the cached scan.
+local MAX_CHATS = 10 -- per worktree, until "… N older" is opened
+
+local function all_view(hist, sessions, panes)
+  local view, by_root, by_wt = {}, {}, {}
+  local function add_repo(root, name, mtime)
+    local vr = { root = root, name = name, mtime = mtime, worktrees = {} }
+    by_root[root] = vr
+    view[#view + 1] = vr
+    return vr
+  end
+  local function add_wt(vr, path, mtime, chats)
+    local vw = { path = path, mtime = mtime, chats = chats, sessions = {}, panes = {} }
+    by_wt[path] = vw
+    table.insert(vr.worktrees, vw)
+    return vw
+  end
+  for _, r in ipairs(hist and hist.repos or {}) do
+    local vr = add_repo(r.root, r.name, r.mtime)
+    for _, w in ipairs(r.worktrees) do
+      add_wt(vr, w.path, w.mtime, w.chats)
+    end
+  end
+  local function wt_for(cwd)
+    if not cwd or cwd == "" or vim.fn.isdirectory(cwd) == 0 then
+      return nil
+    end
+    local g = history_mod.git_of(cwd)
+    if not g then
+      return nil
+    end
+    local vr = by_root[g.root] or add_repo(g.root, g.name, 0)
+    vr.live = true
+    return by_wt[g.worktree] or add_wt(vr, g.worktree, 0, {})
+  end
+  local tracked = {}
+  for _, s in ipairs(sessions) do
+    if s.tmux_pane and s.tmux_pane ~= "" then
+      tracked[s.tmux_pane] = true
+    end
+    local vw = wt_for(s.cwd)
+    if vw then
+      table.insert(vw.sessions, s)
+    end
+  end
+  for _, p in ipairs(panes) do
+    if not tracked[p.pane] then
+      local vw = wt_for(p.cwd)
+      if vw then
+        table.insert(vw.panes, p)
+      end
+    end
+  end
+  -- Live first, then most recent.
+  local function order(a, b)
+    local la = a.live or (a.sessions and (#a.sessions > 0 or #a.panes > 0)) or false
+    local lb = b.live or (b.sessions and (#b.sessions > 0 or #b.panes > 0)) or false
+    if la ~= lb then
+      return la
+    end
+    if a.mtime ~= b.mtime then
+      return a.mtime > b.mtime
+    end
+    return (a.path or a.root) < (b.path or b.root)
+  end
+  for _, vr in ipairs(view) do
+    table.sort(vr.worktrees, order)
+    for _, vw in ipairs(vr.worktrees) do
+      table.sort(vw.sessions, function(x, y)
+        return (STATE_ORDER[x.state] or 9) < (STATE_ORDER[y.state] or 9)
+      end)
+    end
+  end
+  table.sort(view, order)
+  return view
+end
+M._all_view = all_view
 
 local function render(sessions, touched, pr_by_path, changed, repos, extra)
   local by_session = {}
@@ -880,7 +1005,7 @@ local function render(sessions, touched, pr_by_path, changed, repos, extra)
       end
     end
     lines[#lines + 1] = line
-    row.group, row.collapsed, row.header = key, collapsed, #lines
+    row.group, row.collapsed, row.header, row.is_header = key, collapsed, #lines, true
     rows[#lines] = row
     highlights[#highlights + 1] = { #lines - 1, 0, name_end, hl }
     if count_start then
@@ -927,6 +1052,197 @@ local function render(sessions, touched, pr_by_path, changed, repos, extra)
         end
         for _, w in ipairs(b.idle) do
           add_idle(w, gkey, header, g.root)
+        end
+      end
+    end
+  end
+
+  -- Last: every conversation on this machine, collapsed until opened.
+  do
+    local view = history and all_view(history, sessions, extra and extra.panes or {}) or nil
+    local open = sec.expanded["all"] == true
+    lines[#lines + 1] = ""
+    local line = (open and "▾ " or "▸ ") .. "All sessions"
+    local name_end = #line
+    if view then
+      line = line .. string.format("  (%d repo%s)", #view, #view == 1 and "" or "s")
+    end
+    lines[#lines + 1] = line
+    local all_header = #lines
+    rows[#lines] = { kind = "all", group = "all", header = #lines, collapsed = not open, is_header = true }
+    highlights[#highlights + 1] = { #lines - 1, 0, name_end, "AtlasSection" }
+    highlights[#highlights + 1] = { #lines - 1, name_end, #line, "AtlasHint" }
+
+    local function hint(text)
+      lines[#lines + 1] = text
+      highlights[#highlights + 1] = { #lines - 1, 0, #text, "AtlasHint" }
+    end
+    -- Live marker: the most urgent tracked session's state, or ◇ for
+    -- Claude running in tmux that claude-status doesn't know.
+    local function live_glyph(vw)
+      local s = vw.sessions[1]
+      if s and STATE_GLYPH[s.state] then
+        return STATE_GLYPH[s.state], STATE_HL[s.state], s.state == "working"
+      elseif s or #vw.panes > 0 then
+        return "◇ ", "AtlasHint", false
+      end
+      return nil
+    end
+    local function chats_label(n, mtime)
+      local parts = {}
+      if n > 0 then
+        parts[#parts + 1] = n .. " chat" .. (n == 1 and "" or "s")
+      end
+      local ago = mtime and mtime > 0 and format_ago(mtime) or ""
+      if ago ~= "" then
+        parts[#parts + 1] = ago
+      end
+      return table.concat(parts, " · ")
+    end
+
+    if open and not view then
+      hint("  loading…")
+    elseif open and #view == 0 then
+      hint("  (no conversations found)")
+    end
+    for _, vr in ipairs(open and view or {}) do
+      local rkey = "all:repo:" .. vr.root
+      local ropen = sec.expanded[rkey] == true
+      local rline = "  " .. (ropen and "▾ " or "▸ ") .. vr.name
+      local rname_end = #rline
+      local glyph, glyph_hl, spins
+      for _, vw in ipairs(vr.worktrees) do
+        glyph, glyph_hl, spins = live_glyph(vw)
+        if glyph then
+          glyph = vim.trim(glyph)
+          break
+        end
+      end
+      local gstart
+      if glyph then
+        gstart = #rline + 2
+        rline = rline .. "  " .. glyph
+      end
+      local nchats = 0
+      for _, vw in ipairs(vr.worktrees) do
+        nchats = nchats + #vw.chats
+      end
+      local meta = (#vr.worktrees > 1 and (#vr.worktrees .. " worktrees · ") or "") .. chats_label(nchats, vr.mtime)
+      local mstart = #rline + 2
+      rline = rline .. "  " .. meta
+      lines[#lines + 1] = rline
+      local repo_header = #lines
+      rows[#lines] = {
+        kind = "all_repo",
+        root = vr.root,
+        group = rkey,
+        header = #lines,
+        collapsed = not ropen,
+        is_header = true,
+        parent_group = "all",
+        parent_header = all_header,
+      }
+      highlights[#highlights + 1] = { #lines - 1, 0, rname_end, "AtlasRepo" }
+      if gstart then
+        highlights[#highlights + 1] = { #lines - 1, gstart, gstart + #glyph, glyph_hl }
+        if spins then
+          spinners[#spinners + 1] = { #lines - 1, gstart }
+        end
+      end
+      highlights[#highlights + 1] = { #lines - 1, mstart, #rline, "Comment" }
+
+      for _, vw in ipairs(ropen and vr.worktrees or {}) do
+        local wkey = "all:wt:" .. vw.path
+        local wopen = sec.expanded[wkey] == true
+        local wglyph, wglyph_hl, wspins = live_glyph(vw)
+        local prefix = "    " .. (wopen and "▾ " or "▸ ")
+        local wline = prefix .. (wglyph or "") .. vim.fn.fnamemodify(vw.path, ":t")
+        local wmeta = chats_label(#vw.chats, vw.mtime)
+        local wmstart = #wline + 2
+        if wmeta ~= "" then
+          wline = wline .. "  " .. wmeta
+        end
+        lines[#lines + 1] = wline
+        local wt_header = #lines
+        local s, p = vw.sessions[1], vw.panes[1]
+        local live = s ~= nil or p ~= nil
+        rows[#lines] = {
+          kind = "all_wt",
+          legend = live and "all_wt_live" or "all_wt",
+          path = vw.path,
+          root = vr.root,
+          chat = #vw.chats > 0,
+          session_id = s and s.session_id,
+          pane = not s and p and p.pane or nil,
+          group = wkey,
+          header = #lines,
+          collapsed = not wopen,
+          is_header = true,
+          parent_group = rkey,
+          parent_header = repo_header,
+        }
+        if wglyph then
+          highlights[#highlights + 1] = { #lines - 1, #prefix, #prefix + #wglyph, wglyph_hl }
+          if wspins then
+            spinners[#spinners + 1] = { #lines - 1, #prefix }
+          end
+        end
+        if wmeta ~= "" then
+          highlights[#highlights + 1] = { #lines - 1, wmstart, #wline, "Comment" }
+        end
+
+        if wopen then
+          -- Which conversations are running: tracked sessions know theirs.
+          local live_chat = {}
+          for _, ses in ipairs(vw.sessions) do
+            live_chat[ses.session_id] = ses
+            if ses.transcript then
+              live_chat[ses.transcript] = ses
+            end
+          end
+          local more_key = "all:more:" .. vw.path
+          local limit = sec.expanded[more_key] and #vw.chats or math.min(#vw.chats, MAX_CHATS)
+          for i = 1, limit do
+            local c = vw.chats[i]
+            local ses = live_chat[c.id] or live_chat[c.file]
+            local title = (ses and ses.title ~= "" and ses.title) or history_mod.title(c.file) or ("(untitled) " .. c.id:sub(1, 8))
+            local cprefix = "        "
+            local cglyph = ses and STATE_GLYPH[ses.state] or ""
+            local cline = cprefix .. cglyph .. title
+            local ago = format_ago(c.mtime)
+            if ago ~= "" then
+              cline = cline .. "  " .. ago
+            end
+            lines[#lines + 1] = cline
+            rows[#lines] = {
+              kind = "all_chat",
+              legend = ses and "all_chat_live" or "all_chat",
+              id = c.id,
+              cwd = c.cwd,
+              path = vw.path,
+              title = title,
+              root = vr.root,
+              session_id = ses and ses.session_id,
+              group = wkey,
+              header = wt_header,
+            }
+            if cglyph ~= "" then
+              highlights[#highlights + 1] = { #lines - 1, #cprefix, #cprefix + #cglyph, STATE_HL[ses.state] }
+              if ses.state == "working" then
+                spinners[#spinners + 1] = { #lines - 1, #cprefix }
+              end
+            end
+            if ago ~= "" then
+              highlights[#highlights + 1] = { #lines - 1, #cline - #ago, #cline, "Comment" }
+            end
+          end
+          if limit < #vw.chats then
+            hint(string.format("        … %d older", #vw.chats - limit))
+            rows[#lines] = { kind = "all_more", key = more_key, root = vr.root, group = wkey, header = wt_header }
+          end
+          if #vw.chats == 0 then
+            hint("        (no conversation saved yet)")
+          end
         end
       end
     end
@@ -1067,6 +1383,54 @@ local function review_paths(touched, extra)
   return paths
 end
 
+--- Rescans ~/.claude/projects for the "All sessions" tree, in the
+--- background, if it's open and the last scan is older than
+--- history_poll_ms (or `force`). Re-renders when done.
+function M.load_history(force)
+  if history_in_flight or not sections.is_expanded("all") then
+    return
+  end
+  if not force and history and vim.uv.now() - history.at < config.history_poll_ms then
+    return
+  end
+  history_in_flight = true
+  local opts = config.history_skip and { skip = config.history_skip } or nil
+  history_mod.scan_async(config.projects_dir, opts, function(repos, removed)
+    history_in_flight = false
+    history = { repos = repos, removed = removed, at = vim.uv.now() }
+    render_last()
+  end)
+end
+
+--- Resumes a conversation from the All tree in a new tmux window
+--- (`claude --resume <id>` in its folder) and opens its live view.
+function M.resume(row)
+  local spawn = require("atlas.spawn")
+  local name = vim.fn.fnamemodify(row.path, ":t") .. "-" .. row.id:sub(1, 6)
+  local ok, err = spawn.open_window(row.cwd, name, { command = "claude --resume " .. vim.fn.shellescape(row.id) })
+  if not ok then
+    vim.notify("atlas: " .. err, vim.log.levels.ERROR)
+    return
+  end
+  -- The window opens in the background; find its pane to jump in.
+  local res = vim.system({ "tmux", "list-panes", "-s", "-F", "#{window_name}|#{pane_id}" }, { text = true }):wait()
+  local pane
+  for l in ((res.code == 0 and res.stdout or "") .. "\n"):gmatch("(.-)\n") do
+    local w, id = l:match("^(.*)|(%%%d+)$")
+    if w == name:gsub("/", "-") then
+      pane = id
+    end
+  end
+  if pane then
+    peek.open_pane(pane)
+  else
+    vim.notify("atlas: resumed " .. row.title .. " in tmux window " .. name, vim.log.levels.INFO)
+  end
+  vim.defer_fn(function()
+    M.refresh(false)
+  end, 2000)
+end
+
 --- Re-reads claude-status and re-renders right away with the PR/CI
 --- status cached so far. If that status is older than pr_poll_ms (or
 --- `force` is set) it's refetched in the background and the sidebar
@@ -1077,6 +1441,7 @@ function M.refresh(force)
     return
   end
   in_flight = true
+  M.load_history(force)
 
   data.sessions(function(sessions, err)
     if err then
@@ -1208,6 +1573,7 @@ function M._reset()
   repo_cache = {}
   show_help = false
   last, pr_cache, pr_fetched_at = nil, {}, 0
+  history, history_in_flight = nil, false
 end
 
 --- True while the spinner timer is running (for tests).

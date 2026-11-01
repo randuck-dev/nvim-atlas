@@ -50,6 +50,28 @@ them:
   had a conversation before). Notes left in its review are kept for
   that worktree; `y` copies them.
 
+At the bottom, **All sessions** (collapsed until you open it) lists
+every Claude Code conversation on this machine, not just the ones
+claude-status tracks: repo → worktree → conversation, most recently
+active first, with live ones (their state, or `◇` for an untracked pane)
+sorted to the top. It's read from Claude's own transcripts in
+`~/.claude/projects`; folders that were removed, aren't in a git repo,
+or are temp space are left out.
+
+- `⏎` on a conversation resumes it (`claude --resume <id>` in a new
+  tmux window) and opens its live view; on a live one it jumps in.
+- `⏎` on a live worktree jumps into its session; otherwise it unfolds.
+- `c` on a worktree starts Claude there (`claude --continue`), `n` makes
+  a new worktree in its repo.
+- Each worktree shows its latest ten conversations; `… N older` shows
+  the rest. `←` folds one level up at a time.
+
+It's built for a hundred-odd repos: nothing is scanned until it's open,
+the scan runs in batches so Neovim doesn't stall, each conversation
+folder's real path is read once and cached on disk, and titles are read
+(from the end of each transcript) only for conversations you unfold.
+While open it rescans every `history_poll_ms`; `r` rescans now.
+
 Sections are your own groupings ("to deploy", "observability", ...):
 `S` makes one, `m` on a session moves it in (or out), and on a section
 row `R` renames it and `d` deletes it (its sessions go back under their
@@ -109,6 +131,7 @@ require("atlas").setup({
   bin_dir = "~/.dotfiles/bin", -- where claude-status/git-review live, if not on Neovim's PATH
   poll_ms = 5000,              -- session state refresh while the sidebar is open
   pr_poll_ms = 30000,          -- PR/CI status refresh (gh, network)
+  history_poll_ms = 30000,     -- "All sessions" rescan while it's open
 })
 ```
 
