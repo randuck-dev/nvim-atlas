@@ -14,9 +14,16 @@ local M = {}
 -- so this repo stays installable without assuming any one person's dotfiles layout.
 local bin_dir = nil
 
+-- At most this many background processes at once; the rest wait their
+-- turn. Checking 40 worktrees used to start ~80 processes in one burst,
+-- each slowing the others down and Neovim stalling while it spawned
+-- them.
+local max_jobs = 4
+
 function M.configure(opts)
   opts = opts or {}
   bin_dir = opts.bin_dir and vim.fn.expand(opts.bin_dir) or nil
+  max_jobs = opts.max_jobs or max_jobs
 end
 
 local function resolve(cmd)
@@ -30,27 +37,57 @@ local function resolve(cmd)
 end
 M._resolve = resolve
 
-local function run(cmd, cb)
+local active, queue = 0, {}
+
+local pump
+
+local function start(cmd, cb)
+  active = active + 1
+  local function finish(...)
+    active = active - 1
+    pump()
+    cb(...)
+  end
   -- vim.system throws synchronously on a spawn failure (e.g. ENOENT)
   -- rather than reporting it through the result callback, so that has to
   -- be caught here too, not just a non-zero exit code below.
   local ok, err_or_handle = pcall(require("atlas.perf").system, cmd, { text = true }, function(result)
     vim.schedule(function()
       if result.code ~= 0 then
-        cb(false, vim.trim(result.stderr or ""))
+        finish(false, vim.trim(result.stderr or ""))
       else
-        cb(true, result.stdout or "")
+        finish(true, result.stdout or "")
       end
     end)
   end)
   if not ok then
     vim.schedule(function()
-      cb(false, "failed to run `" .. table.concat(cmd, " ") .. "`: " .. tostring(err_or_handle))
+      finish(false, "failed to run `" .. table.concat(cmd, " ") .. "`: " .. tostring(err_or_handle))
     end)
   end
 end
 
-local function run_json(cmd, cb)
+pump = function()
+  while active < max_jobs and #queue > 0 do
+    local job = table.remove(queue, 1)
+    start(job.cmd, job.cb)
+  end
+end
+
+-- Runs cmd in the background: cb(true, stdout) or cb(false, stderr).
+-- Queued behind other atlas processes (see max_jobs); `first` jumps the
+-- queue, for what the sidebar shows first (session state).
+local function run(cmd, cb, first)
+  table.insert(queue, first and 1 or #queue + 1, { cmd = cmd, cb = cb })
+  pump()
+end
+
+--- Processes running and waiting (for tests).
+function M._jobs()
+  return active, #queue
+end
+
+local function run_json(cmd, cb, first)
   run(cmd, function(ok, out)
     if not ok then
       cb(nil, out)
@@ -62,7 +99,7 @@ local function run_json(cmd, cb)
       return
     end
     cb(decoded, nil)
-  end)
+  end, first)
 end
 
 -- Runs `fns` (each `function(done)`, calling `done(result)` once finished)
@@ -88,14 +125,14 @@ end
 --- All live Claude Code sessions: array of {state, cwd, tmux_pane,
 --- session_id, pid, updated, since, transcript, title, detail, last_prompt}.
 function M.sessions(cb)
-  run_json({ resolve("claude-status"), "json" }, cb)
+  run_json({ resolve("claude-status"), "json" }, cb, true)
 end
 
 --- Worktrees touched by each session (live, or ended within 14 days):
 --- array of {session_id, cwd, title, transcript, updated, paths, live},
 --- where `paths` maps a touched worktree path to its last-touched epoch.
 function M.touched(cb)
-  run_json({ resolve("claude-status"), "touched" }, cb)
+  run_json({ resolve("claude-status"), "touched" }, cb, true)
 end
 
 --- "<merge-base-sha> <target-ref>" for `dir`, via `git-review --base`.
@@ -173,6 +210,48 @@ function M.repo_of(dir, cb)
   end)
 end
 
+-- Whether a worktree has commits beyond its target only changes when
+-- HEAD or the target moves, so has_changes remembers the answer with
+-- the commits it was worked out from: dir -> { refs, key, ahead }.
+-- Checking it again is then one `git rev-parse` instead of git-review
+-- (a shell script running three gits), `git remote` and `git rev-list`.
+local ahead_cache = {}
+
+-- Each worktree's origin URL, for PR lookups: path -> { url, at }.
+-- Re-read every few minutes; remotes almost never change.
+local origins = {}
+local ORIGIN_TTL_MS = 5 * 60 * 1000
+
+-- Works out (and remembers) whether `dir` has commits beyond its target.
+local function ahead_of_target(dir, cb)
+  M.review_base(dir, function(base, target)
+    if not base then
+      ahead_cache[dir] = nil
+      cb(false)
+      return
+    end
+    local new_repo = target == "(new repo)"
+    local refs = new_repo and { "HEAD" } or { "HEAD", target }
+    run(vim.list_extend({ "git", "-C", dir, "rev-parse" }, refs), function(ok, shas)
+      if not ok then
+        ahead_cache[dir] = nil
+        cb(false)
+        return
+      end
+      local head = vim.trim(shas):match("^(%x+)")
+      -- A new repo: anything committed is new.
+      local range = new_repo and head or (base .. ".." .. head)
+      run({ "git", "-C", dir, "rev-list", "--count", range }, function(ok2, count)
+        local ahead = ok2 and (tonumber(vim.trim(count)) or 0) > 0
+        if ok2 then
+          ahead_cache[dir] = { refs = refs, key = vim.trim(shas), ahead = ahead }
+        end
+        cb(ahead)
+      end)
+    end)
+  end)
+end
+
 --- Whether `dir` has anything to review: uncommitted or untracked files,
 --- or commits that aren't in its target branch (the same merge-base
 --- comparison `git review` uses). cb(true|false). In a new repo (see
@@ -187,18 +266,67 @@ function M.has_changes(dir, cb)
       cb(true)
       return
     end
-    M.review_base(dir, function(base, target)
-      if not base then
-        cb(false)
-        return
+    local cached = ahead_cache[dir]
+    if not cached then
+      ahead_of_target(dir, cb)
+      return
+    end
+    run(vim.list_extend({ "git", "-C", dir, "rev-parse" }, cached.refs), function(ok2, shas)
+      if ok2 and vim.trim(shas) == cached.key then
+        cb(cached.ahead)
+      else
+        ahead_of_target(dir, cb)
       end
-      -- A new repo: anything committed is new.
-      local range = target == "(new repo)" and "HEAD" or (base .. "..HEAD")
-      run({ "git", "-C", dir, "rev-list", "--count", range }, function(ok2, count)
-        cb(ok2 and (tonumber(vim.trim(count)) or 0) > 0)
-      end)
     end)
   end)
+end
+
+-- Where a worktree's .git folder is (its own folder for a linked
+-- worktree), read from disk; nil if it isn't a git checkout.
+local gitdirs = {}
+local function gitdir_of(dir)
+  if gitdirs[dir] then
+    return gitdirs[dir]
+  end
+  local st = vim.uv.fs_stat(dir .. "/.git")
+  local g
+  if st and st.type == "directory" then
+    g = dir .. "/.git"
+  elseif st and st.type == "file" then
+    local f = io.open(dir .. "/.git")
+    local line = f and f:read("*l")
+    if f then
+      f:close()
+    end
+    g = line and line:match("^gitdir:%s*(.-)%s*$")
+    if g and g:sub(1, 1) ~= "/" then
+      g = vim.fs.normalize(dir .. "/" .. g)
+    end
+  end
+  gitdirs[dir] = g
+  return g
+end
+
+--- A cheap fingerprint of `dir`'s git state, from file stats only (no
+--- process): its index and HEAD. Staging, committing, switching branch
+--- or resetting changes it; editing a file doesn't. nil if `dir` isn't
+--- a git checkout.
+function M.git_state(dir)
+  local g = gitdir_of(dir)
+  if not g then
+    return nil
+  end
+  local parts = {}
+  for _, name in ipairs({ "index", "HEAD" }) do
+    local st = vim.uv.fs_stat(g .. "/" .. name)
+    parts[#parts + 1] = st and (st.mtime.sec .. "." .. st.mtime.nsec .. ":" .. st.size) or "-"
+  end
+  return table.concat(parts, "|")
+end
+
+--- Forgets cached git answers (for tests).
+function M._reset_caches()
+  ahead_cache, gitdirs, origins = {}, {}, {}
 end
 
 --- has_changes for many paths at once, in parallel. cb(set) where
@@ -236,8 +364,15 @@ end
 M._owner_repo = owner_repo
 
 local function git_origin(path, cb)
+  local c = origins[path]
+  if c and vim.uv.now() - c.at < ORIGIN_TTL_MS then
+    cb(c.url)
+    return
+  end
   run({ "git", "-C", path, "remote", "get-url", "origin" }, function(ok, out)
-    cb(ok and vim.trim(out) or nil)
+    local url = ok and vim.trim(out) or nil
+    origins[path] = { url = url, at = vim.uv.now() }
+    cb(url)
   end)
 end
 

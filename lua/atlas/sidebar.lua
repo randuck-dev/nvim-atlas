@@ -27,6 +27,7 @@ local config = {
   poll_ms = 5000, -- claude-status: local files, cheap
   pr_poll_ms = 30000, -- gh: network, rate-limited
   history_poll_ms = 30000, -- rescan ~/.claude/projects while "All sessions" is open
+  idle_check_ms = 60000, -- re-check worktrees without a live session for changes at least this often
   projects_dir = nil, -- default ~/.claude/projects
   history_skip = nil, -- path prefixes to leave out (default: temp folders)
 }
@@ -1388,6 +1389,58 @@ local function review_paths(touched, extra)
   return paths
 end
 
+-- When each worktree was last checked for changes, and its git state
+-- then: path -> { at = uv.now(), state = data.git_state }.
+local change_checked = {}
+
+-- Which of `paths` to check for changes on this poll. Checking all of
+-- them every few seconds was most of atlas's CPU with ~40 worktrees,
+-- and most of them sit idle. So: always the worktrees a live session
+-- is in or has touched; the rest when their git state changed (staged,
+-- committed, switched branch), at least every idle_check_ms (catches
+-- plain file edits), or on a forced refresh.
+local function due_for_check(paths, sessions, touched, force)
+  local live, cwds = {}, {}
+  for _, s in ipairs(sessions) do
+    live[s.session_id] = true
+    if s.cwd and s.cwd ~= "" then
+      cwds[#cwds + 1] = s.cwd
+    end
+  end
+  local hot = {}
+  for _, t in ipairs(touched) do
+    if t.live or live[t.session_id] then
+      for p in pairs(t.paths or {}) do
+        hot[p] = true
+      end
+    end
+  end
+  local function has_session(p)
+    if hot[p] then
+      return true
+    end
+    for _, cwd in ipairs(cwds) do
+      if cwd == p or cwd:sub(1, #p + 1) == p .. "/" then
+        return true
+      end
+    end
+    return false
+  end
+
+  local now, due = vim.uv.now(), {}
+  for _, p in ipairs(paths) do
+    local c = change_checked[p]
+    local state = data.git_state(p)
+    if force or has_session(p) or not c or now - c.at >= config.idle_check_ms or state ~= c.state then
+      due[#due + 1] = p
+      change_checked[p] = { at = now, state = state }
+    end
+  end
+  perf.count("worktrees checked", #due)
+  perf.count("worktrees skipped", #paths - #due)
+  return due
+end
+
 --- Rescans ~/.claude/projects for the "All sessions" tree, in the
 --- background, if it's open and the last scan is older than
 --- history_poll_ms (or `force`). Re-renders when done.
@@ -1481,10 +1534,28 @@ function M.refresh(force)
           local paths = perf.measure("worktree paths", review_paths, touched, extra)
           if not changes_in_flight then
             changes_in_flight = true
-            data.changed(paths, function(set)
+            local due = perf.measure("pick worktrees to check", due_for_check, paths, sessions, touched, force)
+            data.changed(due, function(set)
               changes_in_flight = false
-              if last and not vim.deep_equal(last.changed, set) then
-                last.changed = set
+              if not last then
+                return
+              end
+              -- Keep the last answer for worktrees not checked this time;
+              -- drop ones no longer listed.
+              local merged, listed = {}, {}
+              for _, p in ipairs(paths) do
+                listed[p] = true
+              end
+              for p in pairs(last.changed or {}) do
+                if listed[p] then
+                  merged[p] = true
+                end
+              end
+              for _, p in ipairs(due) do
+                merged[p] = set[p] or nil
+              end
+              if not vim.deep_equal(last.changed, merged) then
+                last.changed = merged
                 render_last()
               end
             end)
@@ -1580,6 +1651,7 @@ function M._reset()
   show_help = false
   last, pr_cache, pr_fetched_at = nil, {}, 0
   history, history_in_flight = nil, false
+  change_checked = {}
 end
 
 --- True while the spinner timer is running (for tests).

@@ -208,6 +208,87 @@ describe("atlas.data.has_changes (real git fixtures)", function()
     vim.fn.mkdir(dir, "p")
     assert.is_false(check(dir))
   end)
+
+  describe("remembering whether a clean worktree is ahead", function()
+    local perf = require("atlas.perf")
+    local function runs(label)
+      local p = perf.snapshot().procs[label]
+      return p and p.n or 0
+    end
+
+    before_each(function()
+      data._reset_caches()
+      perf.reset()
+    end)
+
+    it("re-checks with one rev-parse instead of git-review while HEAD and target stay put", function()
+      assert.is_false(check(root .. "/wt"))
+      assert.are.equal(1, runs("git-review --base"))
+      assert.are.equal(1, runs("git remote"))
+      assert.is_false(check(root .. "/wt"))
+      assert.is_false(check(root .. "/wt"))
+      assert.are.equal(1, runs("git-review --base"))
+      assert.are.equal(1, runs("git remote"))
+    end)
+
+    it("works it out again when HEAD moves", function()
+      assert.is_false(check(root .. "/wt"))
+      vim.fn.writefile({ "two" }, root .. "/wt/f.txt")
+      git(root .. "/wt", { "commit", "-q", "-am", "change" })
+      assert.is_true(check(root .. "/wt"))
+      assert.are.equal(2, runs("git-review --base"))
+    end)
+
+    it("works it out again when the target moves", function()
+      vim.fn.writefile({ "two" }, root .. "/wt/f.txt")
+      git(root .. "/wt", { "commit", "-q", "-am", "change" })
+      assert.is_true(check(root .. "/wt"))
+      -- The work lands in main: nothing left to review.
+      git(root .. "/main", { "merge", "-q", "--ff-only", "feature" })
+      assert.is_false(check(root .. "/wt"))
+    end)
+  end)
+
+  it("git_state changes when the index or HEAD does, not on a plain edit", function()
+    data._reset_caches()
+    local wt = root .. "/wt"
+    local s1 = data.git_state(wt)
+    assert.is_not_nil(s1)
+    vim.fn.writefile({ "edited" }, wt .. "/f.txt")
+    assert.are.equal(s1, data.git_state(wt))
+    vim.wait(20) -- so mtimes differ
+    git(wt, { "add", "f.txt" })
+    local s2 = data.git_state(wt)
+    assert.are_not.equal(s1, s2)
+    vim.wait(20)
+    git(wt, { "checkout", "-q", "-b", "other" })
+    assert.are_not.equal(s2, data.git_state(wt))
+    assert.is_not_nil(data.git_state(root .. "/main"))
+    vim.fn.mkdir(root .. "/plain", "p")
+    assert.is_nil(data.git_state(root .. "/plain"))
+  end)
+
+  it("runs at most max_jobs processes at once, and all of them in the end", function()
+    local perf = require("atlas.perf")
+    local paths = {}
+    for i = 1, 6 do
+      local wt = root .. "/wt" .. i
+      git(root .. "/main", { "worktree", "add", "-q", wt, "-b", "b" .. i })
+      paths[#paths + 1] = wt
+    end
+    data.configure({ max_jobs = 2 })
+    perf.reset()
+    local ok, set = pcall(await, function(cb)
+      data.changed(paths, cb)
+    end)
+    data.configure({ max_jobs = 4 })
+    assert.is_true(ok, tostring(set))
+    assert.are.same({}, set[1])
+    assert.are.equal(2, perf.snapshot().peak)
+    local active, waiting = data._jobs()
+    assert.are.equal(0, active)
+    assert.are.equal(0, waiting)
+  end)
 end)
 
 describe("atlas.data.repo_of (real git fixtures)", function()

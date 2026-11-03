@@ -174,14 +174,14 @@ function M.measure(name, fn, ...)
   return unpack(res, 2, res.n)
 end
 
---- Counts an event without timing it (e.g. a poll tick).
-function M.count(name)
+--- Counts an event without timing it (e.g. a poll tick); `n` times.
+function M.count(name, n)
   local s = lua[name]
   if not s then
     s = { n = 0, ns = 0, max = 0 }
     lua[name] = s
   end
-  s.n = s.n + 1
+  s.n = s.n + (n or 1)
 end
 
 --- Everything recorded so far, as plain data (for tests and scripts).

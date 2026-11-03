@@ -148,8 +148,17 @@ require("atlas").setup({
   poll_ms = 5000,              -- session state refresh while the sidebar is open
   pr_poll_ms = 30000,          -- PR/CI status refresh (gh, network)
   history_poll_ms = 30000,     -- "All sessions" rescan while it's open
+  idle_check_ms = 60000,       -- how often worktrees without a live session are checked for changes
+  max_jobs = 4,                -- background processes (git, claude-status, gh) at once
 })
 ```
+
+Worktrees a live session is in, or has touched, are checked for changes
+on every poll. Others are checked when their git state moves (staged,
+committed, switched branch: a file stat, no process), at least every
+`idle_check_ms` (to catch plain edits), and on `r`. A clean worktree's
+"commits ahead of its target" answer is kept until HEAD or the target
+moves.
 
 ## Depends on
 

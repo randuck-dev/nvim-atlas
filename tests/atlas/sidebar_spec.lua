@@ -215,6 +215,50 @@ describe("atlas.sidebar", function()
     end))
   end)
 
+  it("checks idle worktrees for changes only when their git state moves", function()
+    local cold = "/tmp/atlas-sb/repo-cold"
+    vim.fn.mkdir(cold, "p")
+    -- Touched by a session that has ended: nothing live works there.
+    table.insert(state.touched, { session_id = "ended", paths = { [cold] = os.time() } })
+    local checks = {}
+    local stub_changed = data.changed
+    data.changed = function(paths, cb)
+      for _, p in ipairs(paths) do
+        checks[p] = (checks[p] or 0) + 1
+      end
+      stub_changed(paths, cb)
+    end
+    local real_state, git_states = data.git_state, {}
+    data.git_state = function(p)
+      return git_states[p]
+    end
+
+    local ok, err = pcall(function()
+      sidebar.toggle()
+      -- Several polls (poll_ms is 100 here).
+      vim.wait(700)
+      assert.truthy((checks["/tmp/atlas-sb/repo-a"] or 0) >= 3, "the live session's worktree, every poll")
+      assert.are.equal(1, checks[cold], "the idle one, once")
+
+      -- Something staged or committed there: checked on the next poll,
+      -- then left alone again.
+      git_states[cold] = "moved"
+      assert.is_true(wait_for(function()
+        return checks[cold] == 2
+      end))
+      vim.wait(300)
+      assert.are.equal(2, checks[cold])
+
+      -- `r` checks everything. (Retried: it's skipped while a poll runs.)
+      assert.is_true(wait_for(function()
+        sidebar.refresh(true)
+        return checks[cold] >= 3
+      end))
+    end)
+    data.git_state = real_state
+    assert(ok, err)
+  end)
+
   it("still shows an unchanged worktree that has pending notes", function()
     local sid = "atlas-sb-test-" .. string.format("%d", vim.uv.hrtime())
     vim.fn.mkdir("/tmp/atlas-sb/repo-noted", "p")

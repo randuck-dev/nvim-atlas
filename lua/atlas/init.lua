@@ -11,6 +11,7 @@ function M.setup(opts)
     poll_ms = opts.poll_ms,
     pr_poll_ms = opts.pr_poll_ms,
     history_poll_ms = opts.history_poll_ms,
+    idle_check_ms = opts.idle_check_ms,
     pr_icons = opts.pr_icons,
   })
   require("atlas.peek").configure({ leave_key = (opts.keys or {}).leave_view })
