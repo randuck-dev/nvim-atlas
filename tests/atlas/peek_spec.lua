@@ -247,6 +247,59 @@ describe("atlas.peek (real tmux client on a grouped view session)", function()
     assert.is_nil(peek._current_view())
   end)
 
+  it("closes the view, not just the pane, when its session is closed", function()
+    local main_win = open_sidebar_and_main_window()
+    local name, other_pane = new_session()
+    table.insert(to_kill, name)
+    -- The session's Claude in a second window: once its pane is gone,
+    -- tmux would move a still-attached view client to the other one.
+    local _, pane = sh({ "tmux", "new-window", "-P", "-F", "#{pane_id}", "-t", "=" .. name .. ":" })
+    assert(pane:match("^%%%d+$"))
+    mock_sessions({ { session_id = "s1", tmux_pane = pane, state = "done" } })
+
+    peek.open("s1")
+    assert.is_true(vim.wait(2000, function()
+      return peek._current_view() ~= nil
+    end))
+    local view = peek._current_view()
+    local term_buf = vim.api.nvim_win_get_buf(main_win)
+    vim.wait(300)
+
+    local ok, err = require("atlas.cleanup").close_pane(pane)
+    assert.is_true(ok, err)
+
+    assert.is_nil(peek._current_view())
+    assert.is_false(session_exists(view))
+    assert.is_false(vim.api.nvim_buf_is_valid(term_buf), "the view's buffer is gone")
+    -- (Not display-message -t: tmux falls back to another pane for a
+    -- missing one.)
+    local _, panes = sh({ "tmux", "list-panes", "-a", "-F", "#{pane_id}" })
+    local alive = {}
+    for p in panes:gmatch("%S+") do
+      alive[p] = true
+    end
+    assert.is_nil(alive[pane], "the session's pane is closed")
+    -- The rest of the real session is left alone.
+    assert.is_true(session_exists(name))
+    assert.is_true(alive[other_pane])
+  end)
+
+  it("leaves a view of another session open when a session is closed", function()
+    open_sidebar_and_main_window()
+    local name, pane = new_session()
+    local other, other_pane = new_session()
+    table.insert(to_kill, name)
+    table.insert(to_kill, other)
+    mock_sessions({ { session_id = "s1", tmux_pane = pane, state = "done" } })
+
+    peek.open("s1")
+    assert.is_true(vim.wait(2000, function()
+      return peek._current_view() ~= nil
+    end))
+    assert.is_false(peek.close_view_of(other_pane))
+    assert.is_not_nil(peek._current_view())
+  end)
+
   it("removes the view session when the tmux client exits on its own", function()
     local main_win = open_sidebar_and_main_window()
     local name, pane = new_session()

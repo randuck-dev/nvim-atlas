@@ -26,7 +26,7 @@ In the sidebar, the top bar shows the keys for the row under the cursor;
 | `<CR>` | open the session's tmux pane (live, interactive) | review its diff (unified)    |
 | `v`    |                                          | review side by side (diffview) |
 | `s`    | send all pending notes into the session  |                                      |
-| `X`    | clean up its finished worktrees, including its own (closes the session) |    |
+| `X`    | close the session, removing its finished worktrees (including its own) |    |
 | `o`    |                                          | open its PR in the browser           |
 | `y`    |                                          | copy its pending notes               |
 | `r`    | refresh now (including PR/CI)            | same                                 |
@@ -119,10 +119,18 @@ kept running) shows as `(folder removed)`; `X` on it closes the leftover
 session.
 
 Cleanup also offers the session's own worktree (e.g. one made with
-`n`); confirming closes that session's tmux pane first. It only removes linked worktrees whose PR is merged or whose branch
-is already in its target, with no uncommitted or untracked changes. It
-asks first, and uses `git worktree remove` / `git branch -d` (never
-force). Remote branches are left alone.
+`n`); confirming closes that session's tmux pane first. It only removes
+linked worktrees whose PR is merged or whose branch is already in its
+target, with no uncommitted or untracked changes. It asks first, and
+uses `git worktree remove` / `git branch -d` (never force). Remote
+branches are left alone. If the session's own worktree isn't finished,
+`X` offers to close the session and keep the worktree instead.
+
+Closing a session also closes its live view, if open, and puts the
+cursor back in the sidebar. The PR status `X` decides with is the one
+the sidebar last fetched (at most `pr_poll_ms` old), so the prompt
+doesn't wait on GitHub; a PR merged since then counts as open, and its
+worktree is kept until a refresh (`r`).
 
 ### Where time and CPU go
 

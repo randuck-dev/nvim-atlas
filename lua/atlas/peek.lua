@@ -76,6 +76,23 @@ local function stop_current()
 end
 M.close = stop_current
 
+--- Closes the view if it's showing `pane`, because that session is
+--- ending: stops the tmux client (before the pane goes, or tmux would
+--- switch it to another window), removes the view session, and wipes
+--- its buffer so the window shows what it did before. Returns true if
+--- it closed one.
+function M.close_view_of(pane)
+  if not (current and current.pane == pane) then
+    return false
+  end
+  local b = current.buf
+  stop_current()
+  if vim.api.nvim_buf_is_valid(b) then
+    pcall(vim.api.nvim_buf_delete, b, { force = true })
+  end
+  return true
+end
+
 local function find_main_window()
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local b = vim.api.nvim_win_get_buf(win)
@@ -229,7 +246,7 @@ function M.open_pane(pane, key)
       return
     end
 
-    current = { buf = buf, job = job, view = view, key = key }
+    current = { buf = buf, job = job, view = view, key = key, pane = pane }
     -- Straight into terminal mode: no `A`/`i` needed to start typing.
     vim.cmd("startinsert")
 

@@ -162,6 +162,15 @@ local function note_id(path)
 end
 M._note_id = note_id
 
+-- Puts the cursor back in the sidebar, e.g. after X closed a session
+-- whose live view had the other window.
+local function focus_sidebar()
+  local win = buf and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) or -1
+  if win ~= -1 then
+    vim.api.nvim_set_current_win(win)
+  end
+end
+
 local function ensure_buf()
   if buf and vim.api.nvim_buf_is_valid(buf) then
     return buf
@@ -305,22 +314,26 @@ local function ensure_buf()
           vim.notify("atlas: " .. err, vim.log.levels.ERROR)
           return
         end
+        focus_sidebar()
         vim.defer_fn(function()
           M.refresh(false)
         end, 500)
       end)
-    elseif row and row.kind == "session" then
-      require("atlas.cleanup").run(row.paths, function(removed)
-        if removed > 0 then
+    elseif row and (row.kind == "session" or row.kind == "idle") then
+      local paths = row.kind == "session" and row.paths or { row.path }
+      local own = row.kind == "session" and { path = row.cwd, pane = row.pane } or nil
+      require("atlas.cleanup").run(paths, function(removed, closed)
+        if removed > 0 or closed then
+          focus_sidebar()
           M.refresh(true)
         end
-      end, { own = { path = row.cwd, pane = row.pane } })
-    elseif row and row.kind == "idle" then
-      require("atlas.cleanup").run({ row.path }, function(removed)
-        if removed > 0 then
-          M.refresh(true)
-        end
-      end)
+      end, {
+        own = own,
+        -- PR status from the last poll (at most pr_poll_ms old), so the
+        -- prompt doesn't wait on GitHub. A PR merged since then shows
+        -- as open and its worktree is kept: `r`, then X again.
+        prs = pr_fetched_at > 0 and pr_cache or nil,
+      })
     end
   end, "atlas: clean up this session's finished worktrees")
 

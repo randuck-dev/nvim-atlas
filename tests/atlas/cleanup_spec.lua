@@ -247,31 +247,82 @@ describe("atlas.cleanup", function()
       assert.is_false(branch_exists("own-done"))
     end)
 
-    it("leaves the session alone when its worktree isn't finished", function()
+    -- Picks `pick` from the prompt, recording what was offered.
+    local function choose(pick)
+      local offered
+      vim.ui.select = function(choices, _, on_choice)
+        offered = choices
+        on_choice(pick)
+      end
+      return function()
+        return offered
+      end
+    end
+
+    it("only offers to close the session when its worktree isn't finished", function()
       local wt = worktree("own-dirty")
       vim.fn.writefile({ "wip" }, wt .. "/wip.txt")
       local pane = pane_in(wt)
+      local offered = choose("Cancel")
 
-      local removed
-      cleanup.run({}, function(n)
-        removed = n
+      local removed, closed
+      cleanup.run({}, function(n, c)
+        removed, closed = n, c
+      end, { own = { path = wt, pane = pane } })
+
+      assert.are.same({ "Close the session, keep its worktree", "Cancel" }, offered())
+      assert.are.equal(0, removed)
+      assert.is_false(closed)
+      assert.is_true(pane_alive(pane), "cancelled: the session keeps running")
+      assert.are.equal(1, vim.fn.isdirectory(wt))
+    end)
+
+    it("closes the session but keeps an unfinished worktree when asked to", function()
+      local wt = worktree("own-wip")
+      vim.fn.writefile({ "wip" }, wt .. "/wip.txt")
+      local pane = pane_in(wt)
+      choose("Close the session, keep its worktree")
+
+      local removed, closed
+      cleanup.run({}, function(n, c)
+        removed, closed = n, c
       end, { own = { path = wt, pane = pane } })
 
       assert.are.equal(0, removed)
-      assert.is_true(pane_alive(pane), "an unfinished session must not be closed")
-      assert.are.equal(1, vim.fn.isdirectory(wt))
+      assert.is_true(closed)
+      assert.is_false(pane_alive(pane))
+      assert.are.equal(1, vim.fn.isdirectory(wt), "unfinished work stays")
+      assert.is_true(branch_exists("own-wip"))
     end)
 
     it("never offers a main checkout, even as the session's own folder", function()
       local pane = pane_in(root .. "/main")
+      local offered = choose("Cancel")
       local removed
       cleanup.run({}, function(n)
         removed = n
       end, { own = { path = root .. "/main", pane = pane } })
 
+      assert.are.same({ "Close the session, keep its worktree", "Cancel" }, offered())
       assert.are.equal(0, removed)
       assert.is_true(pane_alive(pane))
       assert.are.equal(1, vim.fn.isdirectory(root .. "/main"))
+    end)
+
+    it("uses PR status it's given instead of asking GitHub", function()
+      -- Merged into main by git's measure, but the given PR status says
+      -- it's still open: kept, so the given status was used.
+      local wt = worktree("own-pr")
+      local pane = pane_in(wt)
+      data.pr_status = function()
+        error("should not ask GitHub")
+      end
+      local offered = choose("Cancel")
+
+      cleanup.run({}, nil, { own = { path = wt, pane = pane }, prs = { [wt] = { number = 7, state = "OPEN" } } })
+
+      assert.are.same({ "Close the session, keep its worktree", "Cancel" }, offered())
+      assert.are.equal(1, vim.fn.isdirectory(wt))
     end)
 
     it("works from a subfolder of the worktree", function()
