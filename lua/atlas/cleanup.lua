@@ -18,7 +18,7 @@ local data = require("atlas.data")
 local M = {}
 
 local function git(dir, args)
-  local r = vim.system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
+  local r = require("atlas.perf").system(vim.list_extend({ "git", "-C", dir }, args), { text = true }):wait()
   return r.code == 0, vim.trim(r.stdout or ""), vim.trim(r.stderr or "")
 end
 
@@ -73,7 +73,7 @@ function M.classify(path, pr)
     return item
   end
 
-  local r = vim.system({ "git-review", "--base", path }, { text = true }):wait()
+  local r = require("atlas.perf").system({ "git-review", "--base", path }, { text = true }):wait()
   local target = (r.stdout or ""):match("^%S+%s+(%S+)")
   if r.code ~= 0 or not target then
     item.reason = "no target branch to compare with"
@@ -121,7 +121,7 @@ function M.close_pane(pane)
   if not require("atlas.deliver").is_pane_id(pane) then
     return false, "no valid tmux pane for the session"
   end
-  local r = vim.system({ "tmux", "kill-pane", "-t", pane }, { text = true }):wait()
+  local r = require("atlas.perf").system({ "tmux", "kill-pane", "-t", pane }, { text = true }):wait()
   if r.code ~= 0 then
     return false, "could not close the session's pane: " .. vim.trim(r.stderr or "")
   end

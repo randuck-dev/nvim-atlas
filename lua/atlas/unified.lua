@@ -112,7 +112,7 @@ function M.parse(diff_text)
 end
 
 local function sh(args, cwd)
-  local r = vim.system(args, { text = true, cwd = cwd }):wait()
+  local r = require("atlas.perf").system(args, { text = true, cwd = cwd }):wait()
   -- `git diff --no-index` exits 1 when files differ: that's success here.
   return (r.code == 0 or r.code == 1), r.stdout or ""
 end
@@ -417,7 +417,7 @@ local function syntax(buf)
       if version == "new" then
         text = read_file(view.path .. "/" .. file)
       else
-        local r = vim.system({ "git", "-C", view.path, "show", view.base .. ":" .. w.old_path }, { text = true }):wait()
+        local r = require("atlas.perf").system({ "git", "-C", view.path, "show", view.base .. ":" .. w.old_path }, { text = true }):wait()
         text = r.code == 0 and r.stdout or nil
       end
       cache[key] = text and M.highlight_spans(text, w.lang) or false

@@ -34,7 +34,7 @@ local function run(cmd, cb)
   -- vim.system throws synchronously on a spawn failure (e.g. ENOENT)
   -- rather than reporting it through the result callback, so that has to
   -- be caught here too, not just a non-zero exit code below.
-  local ok, err_or_handle = pcall(vim.system, cmd, { text = true }, function(result)
+  local ok, err_or_handle = pcall(require("atlas.perf").system, cmd, { text = true }, function(result)
     vim.schedule(function()
       if result.code ~= 0 then
         cb(false, vim.trim(result.stderr or ""))
@@ -56,7 +56,7 @@ local function run_json(cmd, cb)
       cb(nil, out)
       return
     end
-    local decoded_ok, decoded = pcall(vim.json.decode, out)
+    local decoded_ok, decoded = pcall(require("atlas.perf").measure, "json decode", vim.json.decode, out)
     if not decoded_ok then
       cb(nil, "failed to parse JSON from `" .. table.concat(cmd, " ") .. "`: " .. tostring(decoded))
       return

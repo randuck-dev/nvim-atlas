@@ -34,7 +34,7 @@ function M.configure(opts)
 end
 
 local function tmux(args)
-  local r = vim.system(vim.list_extend({ "tmux" }, args), { text = true }):wait()
+  local r = require("atlas.perf").system(vim.list_extend({ "tmux" }, args), { text = true }):wait()
   return r.code == 0, vim.trim(r.stdout or ""), vim.trim(r.stderr or "")
 end
 
@@ -138,7 +138,7 @@ local function refresh_client(view)
   local ok, tty = tmux({ "list-clients", "-t", sess(view), "-F", "#{client_tty}" })
   tty = ok and tty:match("^(%S+)")
   if tty then
-    vim.system({ "tmux", "refresh-client", "-t", tty })
+    require("atlas.perf").system({ "tmux", "refresh-client", "-t", tty })
   end
 end
 

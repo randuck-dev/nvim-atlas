@@ -16,6 +16,19 @@ function M.setup(opts)
   require("atlas.peek").configure({ leave_key = (opts.keys or {}).leave_view })
 
   vim.api.nvim_create_user_command("AtlasToggle", sidebar.toggle, {})
+  -- Where atlas spends time: processes it starts, Lua work, CPU.
+  vim.api.nvim_create_user_command("AtlasStats", function(cmd_opts)
+    if cmd_opts.args == "reset" then
+      require("atlas.perf").reset()
+    else
+      require("atlas.perf").open()
+    end
+  end, {
+    nargs = "?",
+    complete = function()
+      return { "reset" }
+    end,
+  })
   -- `range = true`: with no explicit range (normal mode, "AtlasAnnotate")
   -- line1/line2 both default to the current line; with a visual
   -- selection ("'<,'>AtlasAnnotate", from the "x"-mode mapping below)

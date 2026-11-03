@@ -61,7 +61,7 @@ function M.session_name(branch)
 end
 
 local function run(args, cwd)
-  local r = vim.system(args, { text = true, cwd = cwd }):wait()
+  local r = require("atlas.perf").system(args, { text = true, cwd = cwd }):wait()
   return r.code == 0, vim.trim(r.stdout or ""), vim.trim(r.stderr or "")
 end
 

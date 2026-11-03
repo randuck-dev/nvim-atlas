@@ -124,6 +124,22 @@ is already in its target, with no uncommitted or untracked changes. It
 asks first, and uses `git worktree remove` / `git branch -d` (never
 force). Remote branches are left alone.
 
+### Where time and CPU go
+
+`:AtlasStats` shows what atlas has been doing since Neovim started (or
+since `:AtlasStats reset`; `R` in the window does the same): every
+process it started, by command (how many, how long, failures), Lua work
+on Neovim's main thread, and CPU as a share of one core, both Neovim's
+own and that of its child processes (e.g. git, and the `jq` calls inside
+claude-status). It's always recording and costs next to nothing, so
+when the fan spins up, open it in that Neovim. It refreshes every 2s
+while open.
+
+Background git calls run with `GIT_OPTIONAL_LOCKS=0`, so a poll never
+takes `.git/index.lock` and can't make a `git add` or `git commit` that
+Claude runs at the same moment fail. The report counts any git call
+that still fails on a lock.
+
 ## Options
 
 ```lua
@@ -159,6 +175,22 @@ Runs the plenary.nvim suite under `tests/atlas/` (clones plenary into
 `.deps/` on first run). Tests exercise the real external processes
 (`git`, `gh`, `claude-status`, terminal buffers) rather than mocking them
 — see individual test files for the fixtures used.
+
+```
+scripts/stress.sh
+```
+
+A stress test, not part of the suite: one repo with 40 worktrees, live
+Claude sessions (some working), conversations on disk for every
+worktree, PRs and tmux panes, with "Claude" running `git add` in a few
+worktrees throughout. It runs the sidebar headless for a minute and
+prints the `:AtlasStats` report, the worst main-thread stalls, total CPU
+measured from outside, and how often Claude's `git add` hit
+`.git/index.lock`. Everything is isolated in a temp folder (own HOME,
+claude-status folder, tmux server, fake `gh` and `claude`). Sizes are
+set through `ATLAS_STRESS_*` variables (see the top of the script);
+`ATLAS_STRESS_PLUGIN=<other checkout>` runs the same test against an
+older version to compare.
 
 ## License
 

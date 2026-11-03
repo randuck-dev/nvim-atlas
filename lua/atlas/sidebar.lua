@@ -14,6 +14,7 @@ local deliver = require("atlas.deliver")
 local peek = require("atlas.peek")
 local sections = require("atlas.sections")
 local history_mod = require("atlas.history")
+local perf = require("atlas.perf")
 
 local M = {}
 
@@ -1295,7 +1296,9 @@ local changes_in_flight = false
 
 local function render_last()
   if last and is_open() then
-    render(vim.deepcopy(last.sessions), last.touched, pr_cache, last.changed, repo_cache, last.extra)
+    perf.measure("sidebar render", function()
+      render(vim.deepcopy(last.sessions), last.touched, pr_cache, last.changed, repo_cache, last.extra)
+    end)
   end
 end
 
@@ -1338,11 +1341,13 @@ local function load_extra(sessions, cb)
   local function done()
     pending = pending - 1
     if pending == 0 then
-      for _, list in pairs(extra.worktrees) do
-        for _, w in ipairs(list) do
-          extra.chats[w.path] = data.last_conversation(w.path)
+      perf.measure("last conversation lookup", function()
+        for _, list in pairs(extra.worktrees) do
+          for _, w in ipairs(list) do
+            extra.chats[w.path] = data.last_conversation(w.path)
+          end
         end
-      end
+      end)
       cb(extra)
     end
   end
@@ -1413,7 +1418,7 @@ function M.resume(row)
     return
   end
   -- The window opens in the background; find its pane to jump in.
-  local res = vim.system({ "tmux", "list-panes", "-s", "-F", "#{window_name}|#{pane_id}" }, { text = true }):wait()
+  local res = require("atlas.perf").system({ "tmux", "list-panes", "-s", "-F", "#{window_name}|#{pane_id}" }, { text = true }):wait()
   local pane
   for l in ((res.code == 0 and res.stdout or "") .. "\n"):gmatch("(.-)\n") do
     local w, id = l:match("^(.*)|(%%%d+)$")
@@ -1473,7 +1478,7 @@ function M.refresh(force)
             last.extra = extra
             render_last()
           end
-          local paths = review_paths(touched, extra)
+          local paths = perf.measure("worktree paths", review_paths, touched, extra)
           if not changes_in_flight then
             changes_in_flight = true
             data.changed(paths, function(set)
@@ -1539,7 +1544,7 @@ local function start_polling()
     vim.schedule_wrap(function()
       if #spinners > 0 and is_open() then
         spin_frame = spin_frame % #SPIN_FRAMES + 1
-        draw_spinners()
+        perf.measure("spinner frame", draw_spinners)
       end
     end)
   )
@@ -1549,6 +1554,7 @@ local function start_polling()
     config.poll_ms,
     vim.schedule_wrap(function()
       if is_open() then
+        perf.count("poll tick")
         M.refresh(false)
       else
         stop_polling()

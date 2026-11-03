@@ -305,9 +305,10 @@ end
 --- cb(repos, removed).
 function M.scan_async(projects_dir, opts, cb)
   local sc = start_scan(projects_dir, opts)
+  local perf = require("atlas.perf")
   local function tick()
-    if step(sc, 100) then
-      cb(finish(sc))
+    if perf.measure("All sessions scan", step, sc, 100) then
+      cb(perf.measure("All sessions scan", finish, sc))
     else
       vim.schedule(tick)
     end

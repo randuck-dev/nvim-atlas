@@ -68,7 +68,7 @@ local function tmux_paste(pane, text)
   if not M.is_pane_id(pane) then
     return false, "not a tmux pane id: '" .. tostring(pane) .. "'"
   end
-  local result = vim.system(
+  local result = require("atlas.perf").system(
     { "tmux", "send-keys", "-l", "-t", pane, BRACKETED_PASTE_START .. text .. BRACKETED_PASTE_END },
     { text = true }
   ):wait()
@@ -84,7 +84,7 @@ local function tmux_submit(pane)
   if not M.is_pane_id(pane) then
     return false, "not a tmux pane id: '" .. tostring(pane) .. "'"
   end
-  local result = vim.system({ "tmux", "send-keys", "-t", pane, "Enter" }, { text = true }):wait()
+  local result = require("atlas.perf").system({ "tmux", "send-keys", "-t", pane, "Enter" }, { text = true }):wait()
   if result.code ~= 0 then
     return false, vim.trim(result.stderr or "")
   end
