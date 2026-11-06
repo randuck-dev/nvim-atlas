@@ -5,8 +5,8 @@
 -- branch runs `claude`, marked @claude with monitor-silence like the
 -- script's windows. Differences: the repo is the one picked in the
 -- sidebar rather than the active pane's, and the window opens in the
--- background (-d) so focus stays in Neovim -- the new session shows up
--- in the sidebar, and <CR> on it opens it. Without `wt`, falls back to
+-- background (-d) and the sidebar then opens it in Neovim's session
+-- view, so you land in the new session. Without `wt`, falls back to
 -- `git worktree add ../<repo>-<branch> -b <branch>`.
 
 local M = {}
@@ -124,7 +124,7 @@ end
 --- `session` (default: the session this Neovim runs in), running
 --- opts.command in `path` (default: `claude -n <opts.session_name>`, or
 --- plain `claude` without one). If a window with that name exists,
---- leaves it alone. Returns ok, err.
+--- leaves it alone. Returns true and the window's pane id, or false, err.
 function M.open_window(path, branch, opts)
   opts = opts or {}
   local session = opts.session
@@ -138,25 +138,29 @@ function M.open_window(path, branch, opts)
   local name = branch:gsub("/", "-")
   local command = M.command_for(opts)
 
-  local _, windows = run({ "tmux", "list-windows", "-t", session, "-F", "#W" })
-  for w in (windows .. "\n"):gmatch("(.-)\n") do
+  local _, windows = run({ "tmux", "list-windows", "-t", session, "-F", "#W|#{pane_id}" })
+  for l in (windows .. "\n"):gmatch("(.-)\n") do
+    local w, pane = l:match("^(.*)|(%%%d+)$")
     if w == name then
-      return true
+      return true, pane
     end
   end
 
-  local ok, _, err = run({ "tmux", "new-window", "-d", "-t", session .. ":", "-n", name, "-c", path, command })
+  local ok, pane, err = run({
+    "tmux", "new-window", "-d", "-P", "-F", "#{pane_id}",
+    "-t", session .. ":", "-n", name, "-c", path, command,
+  })
   if not ok then
     return false, "tmux new-window failed: " .. err
   end
   local target = session .. ":" .. name
   run({ "tmux", "set-option", "-w", "-t", target, "@claude", "1" })
   run({ "tmux", "set-option", "-w", "-t", target, "monitor-silence", "30" })
-  return true
+  return true, pane
 end
 
 --- Prompts for a branch name, then creates the worktree in `root` and
---- starts a Claude session in it. cb(ok) when done.
+--- starts a Claude session in it. cb(ok, name, pane) when done.
 function M.prompt(root, cb, opts)
   cb = cb or function() end
   local repo = vim.fn.fnamemodify(root, ":t")
@@ -173,15 +177,15 @@ function M.prompt(root, cb, opts)
       return
     end
     local name = M.session_name(branch)
-    local ok, werr = M.open_window(path, branch, vim.tbl_extend("force", opts or {}, { session_name = name }))
+    local ok, pane_or_err = M.open_window(path, branch, vim.tbl_extend("force", opts or {}, { session_name = name }))
     if not ok then
-      vim.notify("atlas: worktree created at " .. path .. ", but " .. werr, vim.log.levels.WARN)
+      vim.notify("atlas: worktree created at " .. path .. ", but " .. pane_or_err, vim.log.levels.WARN)
       cb(false)
       return
     end
     M.remember(path, name)
     vim.notify("atlas: started " .. name .. " in " .. repo, vim.log.levels.INFO)
-    cb(true, name)
+    cb(true, name, pane_or_err)
   end)
 end
 

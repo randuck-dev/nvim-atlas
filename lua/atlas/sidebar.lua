@@ -373,8 +373,12 @@ local function ensure_buf()
       vim.notify("atlas: put the cursor on a repo (or one of its sessions)", vim.log.levels.WARN)
       return
     end
-    require("atlas.spawn").prompt(row.root, function(ok)
+    require("atlas.spawn").prompt(row.root, function(ok, _, pane)
       if ok then
+        -- Jump into the new session, like resuming one does.
+        if pane then
+          peek.open_pane(pane)
+        end
         -- The session registers with claude-status once claude starts;
         -- the background poll picks it up after that.
         vim.defer_fn(function()
@@ -1478,19 +1482,10 @@ end
 function M.resume(row)
   local spawn = require("atlas.spawn")
   local name = vim.fn.fnamemodify(row.path, ":t") .. "-" .. row.id:sub(1, 6)
-  local ok, err = spawn.open_window(row.cwd, name, { command = "claude --resume " .. vim.fn.shellescape(row.id) })
+  local ok, pane = spawn.open_window(row.cwd, name, { command = "claude --resume " .. vim.fn.shellescape(row.id) })
   if not ok then
-    vim.notify("atlas: " .. err, vim.log.levels.ERROR)
+    vim.notify("atlas: " .. pane, vim.log.levels.ERROR)
     return
-  end
-  -- The window opens in the background; find its pane to jump in.
-  local res = require("atlas.perf").system({ "tmux", "list-panes", "-s", "-F", "#{window_name}|#{pane_id}" }, { text = true }):wait()
-  local pane
-  for l in ((res.code == 0 and res.stdout or "") .. "\n"):gmatch("(.-)\n") do
-    local w, id = l:match("^(.*)|(%%%d+)$")
-    if w == name:gsub("/", "-") then
-      pane = id
-    end
   end
   if pane then
     peek.open_pane(pane)

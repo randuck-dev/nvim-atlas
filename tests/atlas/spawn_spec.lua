@@ -75,8 +75,10 @@ describe("atlas.spawn", function()
 
   it("opens a background window named after the branch, marked like wt-spawn", function()
     local _, active_before = sh({ "tmux", "display-message", "-p", "-t", tmux_session, "#{window_id}" })
-    local ok, err = spawn.open_window(root .. "/repo", "feature/y", { session = tmux_session, command = "sleep 300" })
-    assert.is_true(ok, err)
+    local ok, pane = spawn.open_window(root .. "/repo", "feature/y", { session = tmux_session, command = "sleep 300" })
+    assert.is_true(ok, pane)
+    local _, window_pane = sh({ "tmux", "display-message", "-p", "-t", tmux_session .. ":feature-y", "#{pane_id}" })
+    assert.are.equal(window_pane, pane, "returns the new window's pane, so callers can jump in")
 
     assert.truthy(vim.tbl_contains(windows(), "feature-y"))
     local _, active_after = sh({ "tmux", "display-message", "-p", "-t", tmux_session, "#{window_id}" })
@@ -88,8 +90,10 @@ describe("atlas.spawn", function()
   end)
 
   it("doesn't open a second window for the same branch", function()
-    spawn.open_window(root .. "/repo", "dup", { session = tmux_session, command = "sleep 300" })
-    spawn.open_window(root .. "/repo", "dup", { session = tmux_session, command = "sleep 300" })
+    local _, first = spawn.open_window(root .. "/repo", "dup", { session = tmux_session, command = "sleep 300" })
+    local ok, second = spawn.open_window(root .. "/repo", "dup", { session = tmux_session, command = "sleep 300" })
+    assert.is_true(ok)
+    assert.are.equal(first, second, "the existing window's pane")
     local n = 0
     for _, w in ipairs(windows()) do
       if w == "dup" then
@@ -103,14 +107,16 @@ describe("atlas.spawn", function()
     vim.ui.input = function(_, cb)
       cb("new-thing")
     end
-    local result
-    spawn.prompt(root .. "/repo", function(ok)
-      result = ok
+    local result, got_pane
+    spawn.prompt(root .. "/repo", function(ok, _, pane)
+      result, got_pane = ok, pane
     end, { use_wt = false, session = tmux_session, command = "sleep 300" })
 
     assert.is_true(result)
     assert.are.equal(1, vim.fn.isdirectory(root .. "/repo-new-thing"))
     assert.truthy(vim.tbl_contains(windows(), "new-thing"))
+    local _, window_pane = sh({ "tmux", "display-message", "-p", "-t", tmux_session .. ":new-thing", "#{pane_id}" })
+    assert.are.equal(window_pane, got_pane, "hands back the pane so the sidebar can jump in")
   end)
 
   it("names a session after its branch plus a short random suffix", function()
