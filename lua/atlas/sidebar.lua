@@ -1692,6 +1692,9 @@ function M.focus_session(session_id)
   return true
 end
 
+--- The sidebar's width when it opens.
+M.WIDTH = 40
+
 --- Opens the sidebar pinned to the far left (like a file-explorer
 --- sidebar) if it isn't already, and refreshes it; closes it if it's
 --- already open.
@@ -1706,7 +1709,7 @@ function M.toggle()
   vim.cmd("vsplit")
   vim.api.nvim_win_set_buf(0, b)
   vim.cmd("wincmd H") -- pin full-height to the far left, regardless of 'splitright'
-  vim.api.nvim_win_set_width(0, 40)
+  vim.api.nvim_win_set_width(0, M.WIDTH)
   vim.wo[0].winfixwidth = true
   vim.wo[0].number = false
   -- LazyVim enables relativenumber and a statuscolumn that draws

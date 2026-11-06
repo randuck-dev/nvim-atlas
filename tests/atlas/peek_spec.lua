@@ -284,6 +284,55 @@ describe("atlas.peek (real tmux client on a grouped view session)", function()
     assert.is_true(alive[other_pane])
   end)
 
+  it("keeps the window and the sidebar's width when a session is closed", function()
+    local main_win = open_sidebar_and_main_window()
+    local sidebar_win
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == "AtlasSidebar" then
+        sidebar_win = w
+      end
+    end
+    vim.api.nvim_win_set_width(sidebar_win, 30)
+    vim.wo[sidebar_win].winfixwidth = true
+    local before_buf = vim.api.nvim_win_get_buf(main_win)
+    local name = new_session()
+    table.insert(to_kill, name)
+    local _, view_pane = sh({ "tmux", "new-window", "-P", "-F", "#{pane_id}", "-t", "=" .. name .. ":" })
+    mock_sessions({ { session_id = "s1", tmux_pane = view_pane, state = "done" } })
+
+    peek.open("s1")
+    assert.is_true(vim.wait(2000, function()
+      return peek._current_view() ~= nil
+    end))
+    vim.wait(300)
+    local ok, err = require("atlas.cleanup").close_pane(view_pane)
+    assert.is_true(ok, err)
+
+    assert.is_true(vim.api.nvim_win_is_valid(main_win), "the view's window stays open")
+    assert.are.equal(before_buf, vim.api.nvim_win_get_buf(main_win), "and shows what it did before")
+    assert.are.equal(30, vim.api.nvim_win_get_width(sidebar_win), "the sidebar keeps its width")
+  end)
+
+  it("opens next to a lone sidebar and gives it its usual width", function()
+    vim.cmd("tabnew")
+    local sidebar_buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[sidebar_buf].filetype = "AtlasSidebar"
+    local sidebar_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(sidebar_win, sidebar_buf)
+    vim.wo[sidebar_win].winfixwidth = true
+    local name, pane = new_session()
+    table.insert(to_kill, name)
+
+    peek.open_pane(pane)
+    assert.is_true(vim.wait(2000, function()
+      return peek._current_view() ~= nil
+    end))
+    local wins = vim.api.nvim_tabpage_list_wins(0)
+    assert.are.equal(2, #wins)
+    assert.are.equal(require("atlas.sidebar").WIDTH, vim.api.nvim_win_get_width(sidebar_win))
+    assert.are.equal(1, vim.fn.win_id2win(sidebar_win), "the sidebar stays on the left")
+  end)
+
   it("leaves a view of another session open when a session is closed", function()
     open_sidebar_and_main_window()
     local name, pane = new_session()

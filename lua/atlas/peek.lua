@@ -76,19 +76,47 @@ local function stop_current()
 end
 M.close = stop_current
 
+local function sidebar_window()
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.bo[vim.api.nvim_win_get_buf(win)].filetype == "AtlasSidebar" then
+      return win
+    end
+  end
+  return nil
+end
+
+--- Runs fn, then puts the sidebar back to the width it had before, so
+--- opening or closing windows next to it doesn't resize it.
+local function keeping_sidebar_width(fn)
+  local sb = sidebar_window()
+  local width = sb and vim.api.nvim_win_get_width(sb)
+  fn()
+  if sb and vim.api.nvim_win_is_valid(sb) and vim.api.nvim_win_get_width(sb) ~= width then
+    vim.api.nvim_win_set_width(sb, width)
+  end
+end
+
 --- Closes the view if it's showing `pane`, because that session is
 --- ending: stops the tmux client (before the pane goes, or tmux would
 --- switch it to another window), removes the view session, and wipes
---- its buffer so the window shows what it did before. Returns true if
---- it closed one.
+--- its buffer. Its window stays open and shows what it did before the
+--- view (or an empty buffer): wiping a buffer closes the windows showing
+--- it, which made the sidebar take over their space. Returns true if it
+--- closed one.
 function M.close_view_of(pane)
   if not (current and current.pane == pane) then
     return false
   end
-  local b = current.buf
+  local b, prev = current.buf, current.prev
   stop_current()
   if vim.api.nvim_buf_is_valid(b) then
-    pcall(vim.api.nvim_buf_delete, b, { force = true })
+    keeping_sidebar_width(function()
+      for _, win in ipairs(vim.fn.win_findbuf(b)) do
+        local back = prev and vim.api.nvim_buf_is_valid(prev) and prev or vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_win_set_buf(win, back)
+      end
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end)
   end
   return true
 end
@@ -216,9 +244,16 @@ function M.open_pane(pane, key)
     end
 
     local win = find_main_window()
+    local prev = win and vim.api.nvim_win_get_buf(win)
     if not win then
-      vim.cmd("vsplit")
+      -- Only the sidebar is open: add a window to its right and give
+      -- the sidebar its usual width back, rather than halving it.
+      vim.cmd("botright vsplit")
       win = vim.api.nvim_get_current_win()
+      local sb = sidebar_window()
+      if sb then
+        vim.api.nvim_win_set_width(sb, require("atlas.sidebar").WIDTH)
+      end
     end
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_win_set_buf(win, buf)
@@ -246,7 +281,7 @@ function M.open_pane(pane, key)
       return
     end
 
-    current = { buf = buf, job = job, view = view, key = key, pane = pane }
+    current = { buf = buf, job = job, view = view, key = key, pane = pane, prev = prev }
     -- Straight into terminal mode: no `A`/`i` needed to start typing.
     vim.cmd("startinsert")
 
