@@ -122,10 +122,62 @@ local function parallel(fns, cb)
   end
 end
 
+--- What `claude agents` reports about a background session, as a
+--- claude-status state: hooks don't follow it there reliably.
+local function background_state(a)
+  if a.state == "blocked" then
+    return "input"
+  elseif a.status == "busy" then
+    return "working"
+  end
+  return "done"
+end
+
+--- Fills in `background` ({id, name}) and the state of each session
+--- that has no tmux pane but runs as a Claude Code background session
+--- (sent there with `claude --bg`, or by accident from the TUI), from
+--- `claude agents --json` output. Sessions are changed in place.
+function M._add_background(sessions, agents)
+  local by_id = {}
+  for _, a in ipairs(agents or {}) do
+    if a.kind == "background" and a.sessionId then
+      by_id[a.sessionId] = a
+    end
+  end
+  for _, s in ipairs(sessions) do
+    local a = (s.tmux_pane == nil or s.tmux_pane == "") and by_id[s.session_id]
+    if a then
+      s.background = { id = a.id or a.sessionId, name = a.name }
+      s.state = background_state(a)
+    end
+  end
+  return sessions
+end
+
 --- All live Claude Code sessions: array of {state, cwd, tmux_pane,
---- session_id, pid, updated, since, transcript, title, detail, last_prompt}.
+--- session_id, pid, updated, since, transcript, title, detail, last_prompt,
+--- background}. `background` is set for sessions that run as a Claude
+--- Code background session instead of in a tmux pane (see _add_background).
 function M.sessions(cb)
-  run_json({ resolve("claude-status"), "json" }, cb, true)
+  run_json({ resolve("claude-status"), "json" }, function(sessions, err)
+    if not sessions then
+      cb(sessions, err)
+      return
+    end
+    local paneless = false
+    for _, s in ipairs(sessions) do
+      paneless = paneless or s.tmux_pane == nil or s.tmux_pane == ""
+    end
+    if not paneless then
+      cb(sessions, nil)
+      return
+    end
+    -- Only asked when needed: it's another process per poll. Without
+    -- `claude` (or on failure) the sessions just stay as they were.
+    run_json({ "claude", "agents", "--json" }, function(agents)
+      cb(M._add_background(sessions, agents), nil)
+    end, true)
+  end, true)
 end
 
 --- Worktrees touched by each session (live, or ended within 14 days):

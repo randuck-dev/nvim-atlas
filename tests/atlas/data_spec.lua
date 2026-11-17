@@ -512,3 +512,36 @@ describe("atlas.data.review_base and has_changes in a new repo (real git)", func
     vim.fn.delete(plain, "rf")
   end)
 end)
+
+describe("atlas.data._add_background", function()
+  it("marks paneless sessions that run as background sessions, with their state", function()
+    local sessions = {
+      { session_id = "s-tmux", tmux_pane = "%1", state = "done" },
+      { session_id = "s-blocked", tmux_pane = "", state = "done" },
+      { session_id = "s-busy", state = "done" },
+      { session_id = "s-idle", tmux_pane = "", state = "working" },
+      { session_id = "s-gone", tmux_pane = "", state = "done" },
+    }
+    local agents = {
+      { kind = "background", sessionId = "s-tmux", id = "t", status = "busy" },
+      { kind = "background", sessionId = "s-blocked", id = "b", name = "bee", status = "busy", state = "blocked" },
+      { kind = "background", sessionId = "s-busy", id = "u", status = "busy" },
+      { kind = "background", sessionId = "s-idle", id = "i", state = "done" },
+      { kind = "interactive", sessionId = "s-gone", status = "idle" },
+    }
+    data._add_background(sessions, agents)
+    assert.is_nil(sessions[1].background, "a tmux session stays a tmux session")
+    assert.are.equal("done", sessions[1].state)
+    assert.are.same({ id = "b", name = "bee" }, sessions[2].background)
+    assert.are.equal("input", sessions[2].state)
+    assert.are.equal("working", sessions[3].state)
+    assert.are.equal("done", sessions[4].state)
+    assert.is_nil(sessions[5].background, "only background sessions count")
+  end)
+
+  it("leaves sessions alone without agent output", function()
+    local sessions = { { session_id = "s", tmux_pane = "", state = "working" } }
+    data._add_background(sessions, nil)
+    assert.are.same({ { session_id = "s", tmux_pane = "", state = "working" } }, sessions)
+  end)
+end)

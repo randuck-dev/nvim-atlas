@@ -46,7 +46,9 @@ local function sess(name)
   return "=" .. name .. ":"
 end
 
--- { buf, job, view } for the one live view, or nil.
+-- { buf, job, view, key, pane, prev } for the one live view, or nil.
+-- view (the grouped tmux session) and pane are nil for a background
+-- session's view.
 local current = nil
 
 -- Quitting Neovim with a view open must not leave its session behind.
@@ -72,7 +74,9 @@ local function stop_current()
   if c.job then
     pcall(vim.fn.jobstop, c.job)
   end
-  tmux({ "kill-session", "-t", sess(c.view) })
+  if c.view then
+    tmux({ "kill-session", "-t", sess(c.view) })
+  end
 end
 M.close = stop_current
 
@@ -211,38 +215,69 @@ function M.open(session_id)
       return
     end
     local pane = session.tmux_pane
-    if not pane or pane == "" then
-      vim.notify("atlas: no tmux pane recorded for this session", vim.log.levels.WARN)
-      return
+    if pane and pane ~= "" then
+      M.open_pane(pane, session_id)
+    elseif session.background then
+      M.open_background(session.background.id, session_id)
+    else
+      vim.notify("atlas: no tmux pane or background session for this session", vim.log.levels.WARN)
     end
-    M.open_pane(pane, session_id)
   end)
 end
+
+--- Same session (`key`) already showing: jumps back into it, typing,
+--- and returns true.
+local function reenter(key)
+  if current and current.key == key and vim.api.nvim_buf_is_valid(current.buf) then
+    local win = vim.fn.bufwinid(current.buf)
+    if win ~= -1 then
+      vim.api.nvim_set_current_win(win)
+      vim.cmd("startinsert")
+      return true
+    end
+  end
+  return false
+end
+
+local show
 
 --- Like open(), for a tmux pane directly (e.g. a Claude claude-status
 --- doesn't know about). `key` is what the sidebar knows the row by
 --- (session id or pane id), for jumping back to it; default: the pane.
 function M.open_pane(pane, key)
   key = key or pane
+  if reenter(key) then
+    return
+  end
+  stop_current()
+
+  local view, view_err = create_view(pane)
+  if not view then
+    vim.notify("atlas: " .. view_err, vim.log.levels.ERROR)
+    return
+  end
+  -- TMUX is unset so tmux allows a client inside a tmux-hosted Neovim.
+  show(key, { "env", "-u", "TMUX", "tmux", "attach-session", "-t", sess(view) }, { view = view, pane = pane })
+end
+
+--- Like open(), for a Claude Code background session (no tmux pane):
+--- runs `claude attach <id>` in the same kind of view. Closing the view
+--- only stops that client; the session keeps running.
+function M.open_background(id, key)
+  key = key or id
+  if reenter(key) then
+    return
+  end
+  stop_current()
+  show(key, { "claude", "attach", id }, {})
+end
+
+--- Shows a terminal running `cmd` in the window next to the sidebar.
+--- opts.view: the grouped tmux view session `cmd` attaches to, removed
+--- with it; opts.pane: the tmux pane it shows.
+show = function(key, cmd, opts)
+  local view = opts.view
   do
-    -- Same session already showing: jump back into it, typing.
-    if current and current.key == key and vim.api.nvim_buf_is_valid(current.buf) then
-      local win = vim.fn.bufwinid(current.buf)
-      if win ~= -1 then
-        vim.api.nvim_set_current_win(win)
-        vim.cmd("startinsert")
-        return
-      end
-    end
-
-    stop_current()
-
-    local view, view_err = create_view(pane)
-    if not view then
-      vim.notify("atlas: " .. view_err, vim.log.levels.ERROR)
-      return
-    end
-
     local win = find_main_window()
     local prev = win and vim.api.nvim_win_get_buf(win)
     if not win then
@@ -262,26 +297,29 @@ function M.open_pane(pane, key)
     -- for the bar. [0] = local to this buffer in this window only.
     vim.wo[win][0].winbar = "%#Comment# " .. leave_key .. " back to sidebar  ·  i type  ·  q close (normal mode)"
 
-    -- jobstart(term=true) runs in the current buffer. TMUX is unset so
-    -- tmux allows a client inside a tmux-hosted Neovim.
-    local job = vim.fn.jobstart({ "env", "-u", "TMUX", "tmux", "attach-session", "-t", sess(view) }, {
+    -- jobstart(term=true) runs in the current buffer.
+    local job = vim.fn.jobstart(cmd, {
       term = true,
       on_exit = function()
         -- The client is gone (detached, killed, or the pane closed):
         -- don't leave the view session behind.
-        tmux({ "kill-session", "-t", sess(view) })
+        if view then
+          tmux({ "kill-session", "-t", sess(view) })
+        end
         if current and current.buf == buf then
           current = nil
         end
       end,
     })
     if job <= 0 then
-      tmux({ "kill-session", "-t", sess(view) })
-      vim.notify("atlas: could not start tmux client", vim.log.levels.ERROR)
+      if view then
+        tmux({ "kill-session", "-t", sess(view) })
+      end
+      vim.notify("atlas: could not start `" .. table.concat(cmd, " ") .. "`", vim.log.levels.ERROR)
       return
     end
 
-    current = { buf = buf, job = job, view = view, key = key, pane = pane, prev = prev }
+    current = { buf = buf, job = job, view = view, key = key, pane = opts.pane, prev = prev }
     -- Straight into terminal mode: no `A`/`i` needed to start typing.
     vim.cmd("startinsert")
 
@@ -289,12 +327,14 @@ function M.open_pane(pane, key)
     vim.keymap.set({ "t", "n" }, leave_key, function()
       back_to_sidebar(key)
     end, { buffer = buf, nowait = true, desc = "atlas: back to the sidebar" })
-    vim.api.nvim_create_autocmd("TermEnter", {
-      buffer = buf,
-      callback = function()
-        refresh_client(view)
-      end,
-    })
+    if view then
+      vim.api.nvim_create_autocmd("TermEnter", {
+        buffer = buf,
+        callback = function()
+          refresh_client(view)
+        end,
+      })
+    end
     vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, {
       buffer = buf,
       once = true,

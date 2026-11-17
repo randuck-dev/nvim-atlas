@@ -637,7 +637,7 @@ local function correlate(sessions, touched, extra)
   local covered, tracked_panes, live = {}, {}, {}
   for _, s in ipairs(sessions) do
     live[s.session_id] = true
-    if s.tmux_pane then
+    if s.tmux_pane and s.tmux_pane ~= "" then
       tracked_panes[s.tmux_pane] = true
     end
     local o = s.cwd and owner(s.cwd)

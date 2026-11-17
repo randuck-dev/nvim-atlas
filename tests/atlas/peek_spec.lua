@@ -451,3 +451,53 @@ describe("atlas.peek (real tmux client on a grouped view session)", function()
     assert.is_nil(peek._current_view())
   end)
 end)
+
+describe("atlas.peek (Claude Code background session)", function()
+  local real_sessions, real_path, bin
+
+  before_each(function()
+    real_sessions = data.sessions
+    real_path = vim.env.PATH
+    -- A stand-in `claude` that shows what it was asked to attach to.
+    bin = vim.fn.tempname()
+    vim.fn.mkdir(bin, "p")
+    vim.fn.writefile({ "#!/bin/sh", 'echo "fake-claude $*"', "sleep 30" }, bin .. "/claude")
+    vim.fn.setfperm(bin .. "/claude", "rwxr-xr-x")
+    vim.env.PATH = bin .. ":" .. real_path
+  end)
+
+  after_each(function()
+    peek.close()
+    data.sessions = real_sessions
+    vim.env.PATH = real_path
+    vim.fn.delete(bin, "rf")
+    vim.cmd("silent! tabclose")
+  end)
+
+  it("runs `claude attach <id>` next to the sidebar when there's no tmux pane", function()
+    local main_win = open_sidebar_and_main_window()
+    mock_sessions({ { session_id = "s1", tmux_pane = "", state = "input", background = { id = "e81d59f0" } } })
+
+    peek.open("s1")
+
+    local buf = vim.api.nvim_win_get_buf(main_win)
+    assert.are.equal("terminal", vim.bo[buf].buftype)
+    assert.is_nil(peek._current_view(), "no tmux view session for a background session")
+    assert.is_true(vim.wait(3000, function()
+      return buf_text(buf):find("fake-claude attach e81d59f0", 1, true) ~= nil
+    end, 50), "expected `claude attach` in the view")
+  end)
+
+  it("still warns when a session has neither a pane nor a background session", function()
+    open_sidebar_and_main_window()
+    mock_sessions({ { session_id = "s1", tmux_pane = "", state = "done" } })
+    local warned
+    local real_notify = vim.notify
+    vim.notify = function(msg)
+      warned = msg
+    end
+    peek.open("s1")
+    vim.notify = real_notify
+    assert.is_truthy(warned and warned:find("no tmux pane or background session", 1, true))
+  end)
+end)
